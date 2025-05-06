@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Belle语音识别</title>
+    <style>
+        :root {
+            --primary-color: #2c3e50;
+            --secondary-color: #3498db;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 2rem auto;
+            padding: 20px;
+        }
+
+        .upload-box {
+            border: 2px dashed #bdc3c7;
+            border-radius: 10px;
+            padding: 3rem;
+            text-align: center;
+            transition: 0.3s;
+            background: #f8f9fa;
+        }
+
+        .upload-box:hover {
+            border-color: var(--secondary-color);
+            background: #fff;
+        }
+
+        button {
+            background: var(--secondary-color);
+            color: white;
+            border: none;
+            padding: 0.8rem 1.5rem;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+
+        button:hover {
+            opacity: 0.9;
+            transform: translateY(-2px);
+        }
+
+        .result-card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-top: 2rem;
+            padding: 1.5rem;
+        }
+
+        .transcript-box {
+            background: #f8f9fa;
+            border-radius: 6px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            line-height: 1.6;
+        }
+
+        .timestamps-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+
+        .timestamps-table th,
+        .timestamps-table td {
+            padding: 0.8rem;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+
+        .timestamps-table th {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .timestamps-table tr:hover {
+            background: #f5f5f5;
+        }
+
+        .time-range {
+            color: var(--secondary-color);
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1 style="color: var(--primary-color); text-align: center;">Belle语音识别系统</h1>
+
+    <div class="upload-box"
+         ondragover="event.preventDefault()"
+         ondrop="handleDrop(event)">
+        <p style="color: #7f8c8d; margin-bottom: 1rem;">拖放音频文件至此或点击上传</p>
+        <input type="file" id="audioFile" accept=".mp3,.wav,.ogg" hidden>
+        <button onclick="document.getElementById('audioFile').click()">选择文件</button>
+    </div>
+
+    <div id="result"></div>
+</div>
+
+<script>
+    const fileInput = document.getElementById('audioFile');
+    const resultDiv = document.getElementById('result');
+
+    // 文件选择处理
+    fileInput.onchange = async (e) => {
+        const file = e.target.files[0];
+        await uploadFile(file);
+    };
+
+    // 拖放处理
+    async function handleDrop(e) {
+        e.preventDefault();
+        const file = e.dataTransfer.files[0];
+        await uploadFile(file);
+    }
+
+    // 上传逻辑
+    async function uploadFile(file) {
+        if (!file) return;
+
+        resultDiv.innerHTML = '<div class="result-card">处理中...</div>';
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const response = await fetch('/api/transcribe', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) throw new Error(await response.text());
+
+            const data = await response.json();
+            showResult(data);
+        } catch (err) {
+            resultDiv.innerHTML = `<div class="result-card" style="color: #e74c3c;">错误: ${err.message}</div>`;
+        }
+    }
+
+    // 结果显示（优化版）
+    function showResult(data) {
+        const card = document.createElement('div');
+        card.className = 'result-card';
+
+        // 主识别结果
+        const transcript = document.createElement('div');
+        // transcript.className = 'transcript-box';
+        // transcript.innerHTML = `
+        //     <h3 style="margin-top: 0; color: var(--primary-color);">识别结果</h3>
+        //     <p>${data.text || '无识别结果'}</p>
+        // `;
+
+        // 时间戳表格
+        const tableWrapper = document.createElement('div');
+        if (data.chunks?.length) {
+            tableWrapper.innerHTML = `
+                <h3 style="color: var(--primary-color);">时间轴</h3>
+                <table class="timestamps-table">
+                    <thead>
+                        <tr>
+                            <th>时间段</th>
+                            <th>内容</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${data.chunks.map(chunk => `
+                            <tr>
+                                <td class="time-range">${formatTime(chunk.timestamp[0])} - ${formatTime(chunk.timestamp[1])}</td>
+                                <td>${chunk.text}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+        } else {
+            tableWrapper.innerHTML = '<p>时间戳信息不可用</p>';
+        }
+
+        card.appendChild(transcript);
+        card.appendChild(tableWrapper);
+        resultDiv.innerHTML = '';
+        resultDiv.appendChild(card);
+    }
+
+    // 时间格式化 (秒转 mm:ss)
+    function formatTime(seconds) {
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+</script>
+</body>
+</html>
