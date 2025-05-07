@@ -20,7 +20,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
 RUN pip install --no-cache-dir \
     torch==2.4.1+cu118 \
