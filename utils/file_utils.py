@@ -11,7 +11,7 @@ import uuid
 import shutil
 import time
 
-from temp.server import TEMP_DIR
+TEMP_DIR = "temp_audio_files"
 
 
 def cleanup_task(task_id: str):

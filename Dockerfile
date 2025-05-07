@@ -1,19 +1,40 @@
-FROM pytorch/pytorch:2.4.1-cuda11.8-cudnn8-runtime
+FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
+
+
+ENV TZ=Asia/Shanghai
+RUN apt-get update && \
+    apt-get install -y tzdata && \
+    rm -rf /var/lib/apt/lists/*
+
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    python3-pip \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
 
 WORKDIR /app
-COPY .. .
-RUN curl -sSL https://install.python-poetry.org | python3 -
 
-ENV PATH="/root/.local/bin:$PATH" \
-    PORT=7000 \
-    POETRY_VIRTUALENVS_CREATE=false
 
-WORKDIR /app
+RUN pip install --no-cache-dir \
+    torch==2.4.1+cu118 \
+    torchvision==0.19.1+cu118 \
+    torchaudio==2.4.1+cu118 \
+    --index-url https://download.pytorch.org/whl/cu118
 
-COPY pyproject.toml  ./
-RUN poetry install --no-root
 
-COPY .. .
+COPY requirements.txt .
 
-EXPOSE 8005
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8005"]
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制整个项目
+COPY . .
+
+
+EXPOSE 7005
+
+# 启动命令
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7005"]
