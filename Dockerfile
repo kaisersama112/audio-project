@@ -1,4 +1,4 @@
-FROM registry.cn-hangzhou.aliyuncs.com/nvidia/cuda:11.8.0-devel-ubuntu22.04
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/nvcr.io/nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
 
 
 ENV TZ=Asia/Shanghai
