@@ -1,4 +1,4 @@
-FROM python:3.11
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.11.9
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/nvcr.io/nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
 # 设置时区
 RUN ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
