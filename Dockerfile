@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
+FROM registry.cn-hangzhou.aliyuncs.com/nvidia/cuda:11.8.0-devel-ubuntu22.04
 
 
 ENV TZ=Asia/Shanghai
@@ -30,11 +30,10 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 复制整个项目
+
 COPY . .
 
 
 EXPOSE 7005
 
-# 启动命令
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7005"]
