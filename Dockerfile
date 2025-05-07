@@ -28,10 +28,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel -i https://mirrors.tun
 
 # 安装PyTorch
 RUN pip install --no-cache-dir \
-    torch==2.4.1 \
-    torchvision==0.19.1 \
-    torchaudio==2.4.1 \
-    --extra-index-url https://mirrors.aliyun.com/pytorch-wheels/cu118
+    torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu118
 
 # 安装项目依赖
 WORKDIR /app
