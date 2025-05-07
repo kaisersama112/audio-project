@@ -17,19 +17,16 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-
-RUN pip install --no-cache-dir \
-    torch==2.4.1+cu118 \
-    torchvision==0.19.1+cu118 \
-    torchaudio==2.4.1+cu118 \
-    --index-url https://download.pytorch.org/whl/cu118
-
-
 COPY requirements.txt .
 
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+RUN pip install --no-cache-dir \
+    torch==2.4.1+cu118 \
+    torchvision==0.19.1+cu118 \
+    torchaudio==2.4.1+cu118 \
+     -f https://mirrors.aliyun.com/pytorch-wheels/cu118
 
 COPY . .
 
