@@ -218,7 +218,7 @@ async def download_bulk_segments(
 
             # 获取并清理说话人信息
             speaker = segment.get("speaker", "unknown")
-            speaker_clean = re.sub(r'[\\/*?:"<>|]', '_', speaker)  # 替换非法字符
+            speaker_clean = re.sub(r'[\\/*?:"<>|]', '_', str(speaker))  # 替换非法字符
 
             # 生成文件名
             time_suffix = f"{segment['start']:.2f}-{segment['end']:.2f}"
