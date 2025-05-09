@@ -5,6 +5,7 @@
 @Author  ：panshangguo
 @Date    ：29/4/2025 下午4:50 
 """
+import os
 
 
 class BaseConfig:
@@ -12,6 +13,11 @@ class BaseConfig:
     TEMP_DIR = "temp_audio_files"
     HOST = "0.0.0.0"
     PORT = 7005
+    num_workers = os.cpu_count()
+    reload = False
+    quantize = True
+    use_fp16 = True
+    cache_dir = "./cache"
 
 
 settings = BaseConfig()

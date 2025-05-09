@@ -2,10 +2,6 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/pre_model/Belle-whisper-large-v3-turbo-zh" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/pre_model/speaker-diarization-3.1" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/pre_model/whisper-large-v2" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/pre_model/whisper-large-v3-turbo" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/train/Whisper-Finetune" vcs="Git" />
   </component>
 </project>
