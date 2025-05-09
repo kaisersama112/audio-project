@@ -133,7 +133,7 @@ async def validate_task(task_id: str):
         return task_data
 
 
-@router.post("/transcribe/", response_model=TranscribeResponse, summary="提交音频转录任务")
+@router.post("/transcribe", response_model=TranscribeResponse, summary="提交音频转录任务")
 async def transcribe_audio(
         file: UploadFile = File(...),
         task_id: Optional[str] = Query(None, description="可选的任务ID"),
