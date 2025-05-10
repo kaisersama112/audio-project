@@ -23,7 +23,6 @@ import re
 import zipfile
 from urllib.parse import quote
 
-from sqlalchemy import Integer, TypeDecorator
 
 from services.audio_service import audio_service
 from utils.database import init_db, update_task, get_db_connection, get_task, create_task

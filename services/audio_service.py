@@ -69,6 +69,7 @@ class AudioService:
         """单个片段的上传任务"""
         try:
             oss_url = oss_service.upload_file(segment_path, task_id)
+
             return {
                 "index": idx,
                 "start": seg["start"],

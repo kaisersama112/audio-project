@@ -45,21 +45,18 @@ class OSSService:
     def upload_file(self, local_path: str, task_id: str) -> str:
         """上传文件到OSS"""
         try:
-            # 生成文件名
             filename = os.path.basename(local_path)
             oss_path = self.generate_file_path(task_id, filename)
 
-            # 设置Content-Type
             ext = os.path.splitext(filename)[1].lower()
             content_type = {
                 '.mp3': 'audio/mpeg',
                 '.wav': 'audio/wav'
             }.get(ext, 'application/octet-stream')
 
-            # 分块上传（适合大文件）
             headers = {
                 'Content-Type': content_type,
-                'x-oss-forbid-overwrite': 'true'  # 防止覆盖
+                'x-oss-forbid-overwrite': 'false'
             }
 
             result = self.bucket.put_object_from_file(
@@ -67,7 +64,8 @@ class OSSService:
             )
 
             if result.status == 200:
-                return f"https://{self.bucket.bucket_name}.{self.bucket.endpoint}/{oss_path}"
+                res_data=result.resp.response
+                return res_data.url
             raise Exception("Upload failed")
 
         except oss2.exceptions.OssError as e:
@@ -77,3 +75,11 @@ class OSSService:
 
 
 oss_service = OSSService()
+#
+# if __name__ == '__main__':
+#
+#     data=oss_service.upload_file(
+#         r"F:\python_project\audio-project\pythonProject\audio-split-src\temp\audio\20250510115240.wav",
+#                             "111"
+#     )
+#     print(data)
