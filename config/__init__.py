@@ -20,6 +20,16 @@ class BaseConfig:
     cache_dir = "./cache"
 
 
+OSS_CONFIG = {
+    "access_key_id": "LTAI5tGE9kR3DQYcFWJfKkk8",
+    "access_key_secret": "bngm8wNfbMw9oFcjiNJaIgRJ93Czvc",
+    "bucket_name": "ailive2025",
+    "endpoint": "oss-cn-chengdu.aliyuncs.com",
+    "cdn_domain": "ailive2025.oss-cn-chengdu.aliyuncs.com",
+    "ssl": True,
+    "is_cname": False
+}
+
 settings = BaseConfig()
 
 # 需要检测的敏感词

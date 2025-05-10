@@ -21,11 +21,15 @@ import json
 import re
 import zipfile
 from urllib.parse import quote
+
+from sqlalchemy import Integer, TypeDecorator
+
 from services.audio_service import audio_service
+from utils.database import init_db, update_task, get_db_connection, get_task, create_task
 from utils.file_utils import cleanup_task
 
 TEMP_DIR = "temp_audio_files"
-router = APIRouter()
+router = APIRouter(tags=["音频切块"])
 
 # 全局任务状态存储及锁
 tasks = {}
@@ -33,10 +37,13 @@ tasks_lock = asyncio.Lock()
 
 
 class Segment(BaseModel):
-    start: float
-    end: float
-    text: str
+    index: Optional[int] = None
+    start: Optional[float] = None
+    end: Optional[float] = None
+    url: Optional[str] = None
+    text: Optional[str] = None
     speaker: Optional[str] = None
+    suffix: Optional[str] = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -55,117 +62,6 @@ class TranscribeResponse(BaseModel):
     task_id: str
 
 
-async def update_task_status(task_id: str,
-                             status: str,
-                             message: str,
-                             progress: Optional[int] = 0,
-                             error: Optional[str] = None):
-    async with tasks_lock:
-        current_time = datetime.now().isoformat()
-        task_data = tasks.get(task_id, {})
-
-        # 计算持续时间
-        duration = None
-        if status in ["completed", "failed"] and "start_time" in task_data:
-            start_time = datetime.fromisoformat(task_data["start_time"])
-            end_time = datetime.fromisoformat(current_time)
-            duration = round((end_time - start_time).total_seconds(), 2)
-
-        task_data.update({
-            "status": status,
-            "message": message,
-            "progress": progress or task_data.get("progress"),
-            "error": error,
-            "complete_time": current_time if status in ["completed", "failed"] else None,
-            "duration": duration or task_data.get("duration")
-        })
-
-        if status == "processing" and "start_time" not in task_data:
-            task_data["start_time"] = current_time
-
-        tasks[task_id] = task_data
-
-
-def convert_to_wav(input_path: str, output_path: str):
-    try:
-        audio = AudioSegment.from_file(input_path)
-        audio.export(output_path, format="wav")
-    except Exception as e:
-        raise RuntimeError(f"格式转换失败: {str(e)}")
-
-
-async def process_audio_task(task_id: str, original_path: str, original_ext: str):
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    try:
-        await update_task_status(task_id, "processing", "开始处理音频文件", 0)
-
-        if original_ext.lower() != '.wav':
-            await update_task_status(task_id, "processing", "正在转换音频格式", 30)
-            wav_path = os.path.join(task_dir, "audio.wav")
-            await asyncio.to_thread(convert_to_wav, original_path, wav_path)
-            processing_path = wav_path
-        else:
-            processing_path = original_path
-
-        # 语音识别阶段
-        await update_task_status(task_id, "processing", "开始语音识别", 40)
-        segments = await asyncio.to_thread(audio_service.transcribe_para_former, processing_path)
-
-        # 结果保存阶段
-        await update_task_status(task_id, "processing", "保存识别结果", 70)
-        with open(os.path.join(task_dir, "segments.json"), "w", encoding="utf-8") as f:
-            json.dump(segments, f, ensure_ascii=False, indent=2)
-
-        await update_task_status(task_id, "completed", "处理完成", 100)
-
-    except Exception as e:
-        await update_task_status(task_id, "failed", "处理过程中发生错误", 100, str(e))
-        shutil.rmtree(task_dir, ignore_errors=True)
-
-
-async def validate_task(task_id: str):
-    async with tasks_lock:
-        task_data = tasks.get(task_id)
-        if not task_data:
-            raise HTTPException(status_code=404, detail="任务不存在")
-        if task_data["status"] != "completed":
-            raise HTTPException(status_code=425, detail="任务尚未完成")
-        return task_data
-
-
-@router.post("/transcribe", response_model=TranscribeResponse, summary="提交音频转录任务")
-async def transcribe_audio(
-        file: UploadFile = File(...),
-        task_id: Optional[str] = Query(None, description="可选的任务ID"),
-        background_tasks: BackgroundTasks = None
-):
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
-    original_ext = os.path.splitext(file.filename)[1]
-    original_path = os.path.join(task_dir, f"original_audio{original_ext}")
-
-    try:
-        contents = await file.read()
-        with open(original_path, "wb") as f:
-            f.write(contents)
-    except Exception as e:
-        shutil.rmtree(task_dir)
-        raise HTTPException(500, f"文件保存失败: {str(e)}")
-
-    # 初始化任务状态
-    await update_task_status(task_id, "pending", "任务已创建，等待处理")
-
-    # 添加后台处理任务
-    background_tasks.add_task(process_audio_task, task_id, original_path, original_ext)
-    background_tasks.add_task(cleanup_task, task_id)
-
-    return JSONResponse({
-        "task_id": task_id,
-        "status": "pending",
-        "message": "任务已提交，正在处理"
-    })
-
-
 # 修改状态响应模型
 class TaskStatusResponse(BaseModel):
     task_id: Optional[str]
@@ -179,38 +75,258 @@ class TaskStatusResponse(BaseModel):
     data: Optional[List[Segment]] = None  # 新增数据字段
 
 
-# 修改状态获取接口
-@router.get("/tasks/{task_id}/status", response_model=TaskStatusResponse, summary="获取任务状态")
-async def get_task_status(task_id: str):
+async def update_task_status(task_data: dict):
+    """更新任务状态（数据库集成版）"""
+    with get_db_connection() as conn:
+        # 构造完整任务数据
+        full_data = {
+            "task_id": task_data["task_id"],
+            "status": task_data.get("status", "pending"),
+            "message": task_data.get("message", ""),
+            "progress": task_data.get("progress", 0),
+            "segments_path": task_data.get("segments_path"),
+            "start_time": task_data.get("start_time"),
+            "complete_time": task_data.get("complete_time"),
+            "duration": task_data.get("duration"),
+            "error": task_data.get("error")
+        }
+
+        # 处理时间计算
+        if full_data["status"] in ["completed", "failed"]:
+            full_data["complete_time"] = datetime.now().isoformat()
+            if full_data.get("start_time"):
+                start = datetime.fromisoformat(full_data["start_time"])
+                end = datetime.fromisoformat(full_data["complete_time"])
+                full_data["duration"] = round((end - start).total_seconds(), 2)
+
+        # 更新数据库
+        conn.execute("""
+        UPDATE tasks SET
+            status = ?,
+            message = ?,
+            progress = ?,
+            segments_path = ?,
+            start_time = ?,
+            complete_time = ?,
+            duration = ?,
+            error = ?
+        WHERE task_id = ?
+        """, (
+            full_data["status"],
+            full_data["message"],
+            full_data["progress"],
+            full_data["segments_path"],
+            full_data["start_time"],
+            full_data["complete_time"],
+            full_data["duration"],
+            full_data["error"],
+            full_data["task_id"]
+        ))
+        conn.commit()
+
+
+def convert_to_wav(input_path: str, output_path: str):
+    try:
+        audio = AudioSegment.from_file(input_path)
+        audio.export(output_path, format="wav")
+    except Exception as e:
+        raise RuntimeError(f"格式转换失败: {str(e)}")
+
+
+async def process_audio_task(task_id: str, original_path: str, original_ext: str):
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    try:
+        await update_task_status({
+            "task_id": task_id,
+            "status": "processing",
+            "message": "开始处理音频文件",
+            "progress": 0
+        })
+
+        if original_ext.lower() != '.wav':
+            await update_task_status({
+                "task_id": task_id,
+                "status": "processing",
+                "message": "正在转换音频格式",
+                "progress": 30
+            })
+
+            wav_path = os.path.join(task_dir, "audio.wav")
+            await asyncio.to_thread(convert_to_wav, original_path, wav_path)
+            processing_path = wav_path
+        else:
+            processing_path = original_path
+
+        # 语音识别阶段
+
+        await update_task_status({
+            "task_id": task_id,
+            "status": "processing",
+            "message": "开始语音识别",
+            "progress": 40
+        })
+        segments = await asyncio.to_thread(audio_service.transcribe_para_former, processing_path, task_id)
+
+        # 结果保存阶段
+
+        await update_task_status({
+            "task_id": task_id,
+            "status": "processing",
+            "message": "保存识别结果",
+            "progress": 70
+        })
+        with open(os.path.join(task_dir, "segments.json"), "w", encoding="utf-8") as f:
+            json.dump(segments, f, ensure_ascii=False, indent=2)
+        await update_task_status({
+            "task_id": task_id,
+            "status": "completed",
+            "message": "处理完成",
+            "progress": 100
+        })
+
+    except Exception as e:
+        await update_task_status({
+            "task_id": task_id,
+            "status": "failed",
+            "message": "处理过程中发生错误",
+            "progress": 100,
+            "error": str(e)
+        })
+
+        shutil.rmtree(task_dir, ignore_errors=True)
+
+
+async def validate_task(task_id: str):
     async with tasks_lock:
         task_data = tasks.get(task_id)
         if not task_data:
             raise HTTPException(status_code=404, detail="任务不存在")
+        if task_data["status"] != "completed":
+            raise HTTPException(status_code=425, detail="任务尚未完成")
+        return task_data
 
-        # 实时计算进行中任务的耗时
-        if task_data.get("status") == "processing":
-            if start_time := task_data.get("start_time"):
-                start = datetime.fromisoformat(start_time)
-                duration = (datetime.now() - start).total_seconds()
-                task_data["duration"] = round(duration, 2)
-        taskStatusResponse = TaskStatusResponse(
-            task_id=task_id,
-            status=task_data.get("status"),
-            message=task_data.get("message"),
-            progress=task_data.get("progress"),
-            start_time=task_data.get("start_time"),
-            complete_time=task_data.get("complete_time"),
-            duration=task_data.get("duration"),
-            error=task_data.get("error"))
-        if task_data.get("status") == "completed":
-            try:
-                task_dir = os.path.join(TEMP_DIR, task_id)
-                with open(os.path.join(task_dir, "segments.json"), "r", encoding="utf-8") as f:
-                    taskStatusResponse.data = json.load(f)
-            except Exception as e:
-                taskStatusResponse.error = f"结果加载失败: {str(e)}"
 
-        return taskStatusResponse
+@router.on_event("startup")
+async def startup():
+    init_db()
+
+
+@router.post("/transcribe", response_model=TranscribeResponse, summary="提交音频转录任务")
+async def transcribe_audio(
+        file: UploadFile = File(...),
+        task_id: Optional[str] = Query(None, description="可选的任务ID"),
+        background_tasks: BackgroundTasks = None
+):
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    original_ext = os.path.splitext(file.filename)[1]
+    original_path = os.path.join(task_dir, f"original_audio{original_ext}")
+    with get_db_connection() as conn:
+        create_task(conn, {
+            "task_id": task_id,
+            "status": "pending",
+            "message": "任务已创建，等待处理",
+            "progress": 0,
+            "original_path": os.path.join(task_dir, f"original_audio{original_ext}"),
+            "created_at": datetime.now().isoformat(),
+            "start_time": None
+        })
+        conn.commit()
+    try:
+        contents = await file.read()
+        with open(original_path, "wb") as f:
+            f.write(contents)
+    except Exception as e:
+        shutil.rmtree(task_dir)
+        raise HTTPException(500, f"文件保存失败: {str(e)}")
+
+    # 初始化任务状态
+    await update_task_status({
+        "task_id": task_id,
+        "status": "pending",
+        "message": "任务已创建，等待处理",
+        "progress": 0
+    })
+    # 添加后台处理任务
+    background_tasks.add_task(process_audio_task, task_id, original_path, original_ext)
+    background_tasks.add_task(cleanup_task, task_id)
+
+    return JSONResponse({
+        "task_id": task_id,
+        "status": "pending",
+        "message": "任务已提交，正在处理"
+    })
+
+
+def load_segments_if_completed(task):
+    if task[1] == "completed" and task[5]:
+        try:
+            with open(task[5], "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            return f"Error loading segments: {str(e)}"
+    return None
+
+
+@router.get("/tasks/{task_id}/status", response_model=TaskStatusResponse, summary="获取任务状态")
+async def get_task_status(task_id: str):
+    with get_db_connection() as conn:
+        task = get_task(conn, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+
+        # 将数据库记录转换为响应模型
+        return TaskStatusResponse(
+            task_id=task[0],
+            status=task[1],
+            message=task[2],
+            progress=task[3],
+            start_time=task[6],
+            complete_time=task[7],
+            duration=task[8],
+            error=task[9],
+            data=load_segments_if_completed(task)
+        )
+
+
+@router.get("/tasks/{task_id}/segments",
+            response_model=List[Segment],
+            summary="获取任务结果",
+            responses={
+                200: {"description": "成功返回语音分段结果"},
+                404: {"description": "任务不存在"},
+                425: {"description": "任务未完成"},
+                500: {"description": "结果文件读取失败"}
+            })
+async def get_task_segments(task_id: str):
+    """
+    根据任务ID获取语音分段结果
+    """
+    # 验证任务状态
+    with get_db_connection() as conn:
+        task = get_task(conn, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+
+        if task[1] != "completed":
+            raise HTTPException(status_code=425, detail="任务尚未完成")
+
+    # 构建文件路径
+    segments_path = os.path.join(TEMP_DIR, task_id, "segments.json")
+
+    try:
+        # 读取并返回结果
+        with open(segments_path, "r", encoding="utf-8") as f:
+            segments = json.load(f)
+            return [Segment(**seg) for seg in segments]
+
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="结果文件不存在")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="结果文件格式错误")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"结果读取失败: {str(e)}")
 
 
 @router.get("/download/single/{task_id}/{segment_index}", responses={

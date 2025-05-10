@@ -35,3 +35,5 @@ python_mecab_ko; sys_platform != 'win32'
 fastapi<0.112.2
 x_transformers
 pyannote.audio==3.3.2
+oss2==2.19.1
+tenacity
