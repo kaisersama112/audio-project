@@ -7,9 +7,10 @@
 """
 import glob
 import asyncio
+import subprocess
 from datetime import datetime
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Query
+from fastapi import APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Query, Form
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from pydub import AudioSegment
@@ -125,6 +126,7 @@ async def update_task_status(task_data: dict):
         conn.commit()
 
 
+
 def convert_to_wav(input_path: str, output_path: str):
     try:
         audio = AudioSegment.from_file(input_path)
@@ -211,52 +213,167 @@ async def startup():
     init_db()
 
 
-@router.post("/transcribe", response_model=TranscribeResponse, summary="提交音频转录任务")
-async def transcribe_audio(
-        file: UploadFile = File(...),
-        task_id: Optional[str] = Query(None, description="可选的任务ID"),
-        background_tasks: BackgroundTasks = None
+# 分片上传响应模型
+class ChunkUploadResponse(BaseModel):
+    task_id: str
+    chunk_number: int
+    uploaded_chunks: int
+    total_chunks: int
+    status: str  # partial/complete
+# 分片上传接口
+@router.post("/upload_chunk", response_model=ChunkUploadResponse)
+async def upload_chunk(
+    file: UploadFile = File(...),
+    chunk_number: int = Form(...),
+    total_chunks: int = Form(...),
+    file_name: str = Form(...),        # 原始文件名
+    task_id: Optional[str] = Form(None),
 ):
+    """上传文件分片"""
+    # 生成或验证任务ID
+    task_id = task_id
+    if not task_id:
+        raise HTTPException(400, "任务ID不能为空")
     task_dir = os.path.join(TEMP_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
 
-    original_ext = os.path.splitext(file.filename)[1]
-    original_path = os.path.join(task_dir, f"original_audio{original_ext}")
-    with get_db_connection() as conn:
-        create_task(conn, {
+    # 验证分片序号有效性
+    if chunk_number < 0 or total_chunks <= 0 or chunk_number >= total_chunks:
+        raise HTTPException(400, "分片参数不合法")
+
+    # 保存元数据（第一个分片时）
+    if chunk_number == 0:
+        metadata = {
+            "file_name": file_name,
+            "total_chunks": total_chunks,
+            "uploaded_chunks": 0
+        }
+        with open(os.path.join(task_dir, "metadata.json"), "w") as f:
+            json.dump(metadata, f)
+
+    # 保存分片文件
+    chunk_path = os.path.join(task_dir, f"chunk_{chunk_number:04d}.part")
+    try:
+        # 流式写入（每次1MB）
+        with open(chunk_path, "wb") as f:
+            while content := await file.read(1024 * 1024):
+                f.write(content)
+    except Exception as e:
+        shutil.rmtree(task_dir, ignore_errors=True)
+        raise HTTPException(500, f"分片保存失败: {str(e)}")
+
+    # 更新已上传分片计数
+    uploaded = len([f for f in os.listdir(task_dir) if f.startswith("chunk_")])
+    return {
+        "task_id": task_id,
+        "chunk_number": chunk_number,
+        "uploaded_chunks": uploaded,
+        "total_chunks": total_chunks,
+        "status": "partial" if uploaded < total_chunks else "complete"
+    }
+
+
+# 在merge_chunks接口中修改合并逻辑
+def merge_with_ffmpeg(task_dir: str, output_path: str):
+    """使用FFmpeg合并分片文件"""
+    # 生成分片列表文件
+    concat_list = os.path.join(task_dir, "concat_list.txt")
+    with open(concat_list, "w") as f:
+        for chunk in sorted(glob.glob(os.path.join(task_dir, "chunk_*.part"))):
+            f.write(f"file '{os.path.basename(chunk)}'\n")
+
+    # 使用FFmpeg合并
+    cmd = [
+        "ffmpeg",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concat_list,
+        "-c", "copy",
+        "-map_metadata", "0",
+        output_path
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        error_msg = f"FFmpeg合并失败: {e.stderr.decode()}"
+        raise RuntimeError(error_msg)
+    finally:
+        os.remove(concat_list)
+def validate_audio_file(file_path: str):
+    """使用FFprobe验证文件有效性"""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path
+    ]
+
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True)
+        duration = float(result.stdout.decode().strip())
+        if duration <= 0:
+            raise ValueError("无效的音频时长")
+        return True
+    except subprocess.CalledProcessError as e:
+        error_msg = f"文件验证失败: {e.stderr.decode()}"
+        raise RuntimeError(error_msg)
+# 合并分片接口
+@router.post("/merge_chunks", response_model=TranscribeResponse)
+async def merge_chunks(
+    task_id: str = Form(...),
+    background_tasks: BackgroundTasks = None
+):
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    if not os.path.exists(task_dir):
+        raise HTTPException(404, "任务不存在")
+
+    try:
+        # 加载元数据
+        with open(os.path.join(task_dir, "metadata.json")) as f:
+            metadata = json.load(f)
+
+        # 验证分片完整性
+        chunk_files = glob.glob(os.path.join(task_dir, "chunk_*.part"))
+        if len(chunk_files) != metadata["total_chunks"]:
+            raise HTTPException(400, "分片数量不匹配")
+
+        # 合并文件（使用FFmpeg）
+        original_ext = os.path.splitext(metadata["file_name"])[1]
+        original_path = os.path.join(task_dir, f"merged{original_ext or '.mp4'}")
+        merge_with_ffmpeg(task_dir, original_path)
+
+        # 格式验证
+        if not validate_audio_file(original_path):
+            raise HTTPException(400, "合并文件格式异常")
+
+        # 创建数据库记录
+        with get_db_connection() as conn:
+            create_task(conn, {
+                "task_id": task_id,
+                "status": "pending",
+                "message": "文件合并完成，等待处理",
+                "progress": 20,
+                "original_path": original_path,
+                "created_at": datetime.now().isoformat(),
+                "start_time": None
+            })
+            conn.commit()
+
+        # 添加后台处理任务
+        background_tasks.add_task(process_audio_task, task_id, original_path, original_ext)
+        background_tasks.add_task(cleanup_task, task_id)
+
+        return JSONResponse({
             "task_id": task_id,
             "status": "pending",
-            "message": "任务已创建，等待处理",
-            "progress": 0,
-            "original_path": os.path.join(task_dir, f"original_audio{original_ext}"),
-            "created_at": datetime.now().isoformat(),
-            "start_time": None
+            "message": "任务已开始处理"
         })
-        conn.commit()
-    try:
-        contents = await file.read()
-        with open(original_path, "wb") as f:
-            f.write(contents)
+
     except Exception as e:
-        shutil.rmtree(task_dir)
-        raise HTTPException(500, f"文件保存失败: {str(e)}")
-
-    # 初始化任务状态
-    await update_task_status({
-        "task_id": task_id,
-        "status": "pending",
-        "message": "任务已创建，等待处理",
-        "progress": 0
-    })
-    # 添加后台处理任务
-    background_tasks.add_task(process_audio_task, task_id, original_path, original_ext)
-    background_tasks.add_task(cleanup_task, task_id)
-
-    return JSONResponse({
-        "task_id": task_id,
-        "status": "pending",
-        "message": "任务已提交，正在处理"
-    })
+        shutil.rmtree(task_dir, ignore_errors=True)
+        raise HTTPException(500, f"文件处理失败: {str(e)}")
 
 
 def load_segments_if_completed(task):

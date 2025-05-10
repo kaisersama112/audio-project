@@ -1,9 +1,9 @@
 """
-@Project ：pythonProject 
+@Project ：pythonProject
 @File    ：audio_service.py.py
-@IDE     ：PyCharm 
+@IDE     ：PyCharm
 @Author  ：panshangguo
-@Date    ：29/4/2025 下午4:51 
+@Date    ：29/4/2025 下午4:51
 """
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
@@ -39,6 +39,31 @@ class AudioService:
         )
         print("Models loaded successfully")
 
+    def _save_segment(self, original_path: str, seg: dict, index: int, task_id: str) -> str:
+        """保存音频片段到临时文件"""
+        audio = AudioSegment.from_file(original_path)
+        start_ms = int(seg["start"] * 1000)
+        end_ms = int(seg["end"] * 1000)
+        segment = audio[start_ms:end_ms]
+
+        # 创建存储目录
+        output_dir = os.path.join(os.path.dirname(original_path), "segments")
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 生成文件名
+        filename = f"seg_{task_id}_{index:04d}.mp3"
+        output_path = os.path.join(output_dir, filename)
+
+        # 导出文件
+        segment.export(output_path,
+                       format="mp3",
+                       bitrate="192k",
+                       tags={
+                           'title': f"Segment {index}",
+                           'artist': 'Audio Processing System'
+                       })
+
+        return output_path
 
     def _upload_single_segment(self, segment_path: str, task_id: str, seg: dict, idx: int) -> Dict:
         """单个片段的上传任务"""
@@ -61,8 +86,7 @@ class AudioService:
             }
 
     def _merge_segments(self, raw_segments: list) -> list:
-        """合并连续相同说话人的片段，且每个合并段落最多包含5个原始片段"""
-        max_count=3
+        """合并连续相同说话人的片段，包含最大合并数量限制"""
         if not raw_segments:
             return []
 
@@ -72,32 +96,43 @@ class AudioService:
             "end": raw_segments[0]["end"],
             "text": raw_segments[0]["text"].strip(),
             "spk": raw_segments[0].get("spk", "unknown"),
-            "count": 1  # 新增计数器
+            "count": 1  # 添加计数器
         }
 
         for seg in raw_segments[1:]:
-            # 合并条件：相同说话人、间隔小于0.5秒且未超过最大合并数量
-            if (seg.get("spk") == current["spk"] and
-                    seg["start"] - current["end"] <= 0.5 and
-                    current["count"] < max_count):
+            # 合并条件：相同说话人 + 间隔 <0.5秒 + 合并次数未达上限
+            can_merge = (
+                    seg.get("spk") == current["spk"] and
+                    (seg["start"] - current["end"]) <= 0.5 and
+                    current["count"] < 5  # 控制最大合并数量
+            )
+
+            if can_merge:
                 current["end"] = seg["end"]
                 current["text"] += " " + seg["text"].strip()
                 current["count"] += 1
             else:
-                # 移除计数器字段后加入结果
-                merged_seg = {k: v for k, v in current.items() if k != 'count'}
-                merged.append(merged_seg)
+                # 保存时去除count字段
+                merged.append({
+                    "start": current["start"],
+                    "end": current["end"],
+                    "text": current["text"],
+                    "spk": current["spk"]
+                })
                 current = {
                     "start": seg["start"],
                     "end": seg["end"],
                     "text": seg["text"].strip(),
                     "spk": seg.get("spk", "unknown"),
-                    "count": 1
+                    "count": 1  # 重置计数器
                 }
 
-        # 处理最后一个段落
-        merged_seg = {k: v for k, v in current.items() if k != 'count'}
-        merged.append(merged_seg)
+        merged.append({
+            "start": current["start"],
+            "end": current["end"],
+            "text": current["text"],
+            "spk": current["spk"]
+        })
         return merged
 
     def _save_merged_segment(self, original_path: str, start: float, end: float,
@@ -112,7 +147,7 @@ class AudioService:
             output_dir = os.path.join(os.path.dirname(original_path), "merged_segments")
             os.makedirs(output_dir, exist_ok=True)
 
-            filename = f"merged_{task_id}_{index:03d}.mp3"
+            filename = f"merged_{task_id}_{index:03d}.wav"
             output_path = os.path.join(output_dir, filename)
 
             segment.export(output_path,
@@ -126,6 +161,7 @@ class AudioService:
             return output_path
         except Exception as e:
             raise RuntimeError(f"合并片段保存失败: {str(e)}")
+
     def transcribe_para_former(self, file_path: str, task_id: str):
         result = self.transcribe_para_former_model.generate(
             input=file_path,
@@ -140,13 +176,10 @@ class AudioService:
         merged_segments = self._merge_segments(raw_segments)
 
         formatted_results = []
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor:
             futures = []
-
-            # 处理合并后的片段
             for idx, merged_seg in enumerate(merged_segments):
                 try:
-                    # 生成合并后的音频文件路径
                     segment_path = self._save_merged_segment(
                         original_path=file_path,
                         start=merged_seg["start"],
@@ -154,8 +187,6 @@ class AudioService:
                         index=idx,
                         task_id=task_id
                     )
-
-                    # 提交上传任务
                     futures.append((idx, executor.submit(
                         self._upload_single_segment,
                         segment_path=segment_path,
