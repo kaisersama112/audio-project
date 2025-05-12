@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Query, Form
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydub import AudioSegment
 from io import BytesIO
 import os
@@ -176,6 +176,7 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "message": "保存识别结果",
             "progress": 70
         })
+        print(segments)
         with open(os.path.join(task_dir, "segments.json"), "w", encoding="utf-8") as f:
             json.dump(segments, f, ensure_ascii=False, indent=2)
         await update_task_status({
@@ -405,9 +406,15 @@ async def get_task_status(task_id: str):
             data=load_segments_if_completed(task)
         )
 
-
+class PaginatedSegments(BaseModel):
+    items: List[Segment]
+    total: int
+    page: int
+    per_page: int
+    total_pages: int
+    search_hits: int = Field(..., description="包含关键字的记录总数")
 @router.get("/tasks/{task_id}/segments",
-            response_model=List[Segment],
+            response_model=PaginatedSegments,
             summary="获取任务结果",
             responses={
                 200: {"description": "成功返回语音分段结果"},
@@ -415,16 +422,19 @@ async def get_task_status(task_id: str):
                 425: {"description": "任务未完成"},
                 500: {"description": "结果文件读取失败"}
             })
-async def get_task_segments(task_id: str):
-    """
-    根据任务ID获取语音分段结果
-    """
+async def get_task_segments(
+    task_id: str,
+    keyword: Optional[str] = Query(None,
+                                  min_length=1,
+                                  description="模糊搜索关键字（匹配文本内容、类型等字段）"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100)
+):
     # 验证任务状态
     with get_db_connection() as conn:
         task = get_task(conn, task_id)
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
-
         if task[1] != "completed":
             raise HTTPException(status_code=425, detail="任务尚未完成")
 
@@ -432,11 +442,8 @@ async def get_task_segments(task_id: str):
     segments_path = os.path.join(TEMP_DIR, task_id, "segments.json")
 
     try:
-        # 读取并返回结果
         with open(segments_path, "r", encoding="utf-8") as f:
-            segments = json.load(f)
-            return [Segment(**seg) for seg in segments]
-
+            segments_data = json.load(f)  # 读取原始数据
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="结果文件不存在")
     except json.JSONDecodeError:
@@ -444,7 +451,47 @@ async def get_task_segments(task_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"结果读取失败: {str(e)}")
 
+    # 应用筛选条件
+    filtered_data = []
+    for seg_dict in segments_data:
+        # 关键字模糊匹配逻辑
+        if keyword:
+            # 定义搜索字段池（根据实际数据结构调整）
+            search_fields = {
+                'text': str(seg_dict.get('text', '')),  # 语音转文字内容
+                'type': str(seg_dict.get('segment_type', '')),  # 分段类型
+                'labels': '|'.join(seg_dict.get('labels', []))  # 标签列表
+            }
+            # 组合搜索文本
+            search_text = ' '.join(search_fields.values()).lower()
+            if keyword.lower() not in search_text:
+                continue
 
+        filtered_data.append(seg_dict)
+    search_hits = len(filtered_data) if keyword else None
+    # 分页处理
+    total = len(filtered_data)
+    total_pages = (total + per_page - 1) // per_page if per_page > 0 else 1
+    start = (page - 1) * per_page
+    end = start + per_page
+
+    # 处理超出范围的情况
+    if start >= total:
+        current_page_data = []
+    else:
+        current_page_data = filtered_data[start:end]
+
+    # 转换为Segment对象
+    items = [Segment(**seg) for seg in current_page_data]
+
+    return PaginatedSegments(
+        items=items,
+        total=total,
+        page=page,
+        per_page=per_page,
+        total_pages=total_pages,
+        search_hits=search_hits or total
+    )
 @router.get("/download/single/{task_id}/{segment_index}", responses={
     200: {"content": {"audio/mpeg": {}}, "description": "返回MP3音频片段"}},
             summary="单音频下载")
