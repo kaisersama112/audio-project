@@ -138,30 +138,65 @@ class AudioService:
 
     def _save_merged_segment(self, original_path: str, start: float, end: float,
                              index: int, task_id: str) -> str:
-        """保存合并后的长片段"""
+        """保存合并后的长片段（修复变量引用问题）"""
+        output_path = None  # 提前初始化变量
         try:
+            # 1. 校验输入参数
+            if not os.path.exists(original_path):
+                raise FileNotFoundError(f"音频文件不存在: {original_path}")
+
+            # 2. 加载音频文件
             audio = AudioSegment.from_file(original_path)
-            start_ms = int(start * 1000)
-            end_ms = int(end * 1000)
+
+            duration_ms = len(audio)  # 音频总时长（毫秒）
+
+            # 3. 校验时间范围有效性
+            start_ms = int(start )
+            end_ms = int(end )
+            if start_ms < 0 or end_ms > duration_ms:
+                raise ValueError(
+                    f"时间范围超出音频边界: 0-{duration_ms / 1000:.2f}s "
+                    f"(请求范围: {start:.2f}-{end:.2f}s)"
+                )
+
+            # 4. 切割音频片段
             segment = audio[start_ms:end_ms]
 
+            # 5. 准备输出路径
             output_dir = os.path.join(os.path.dirname(original_path), "merged_segments")
             os.makedirs(output_dir, exist_ok=True)
 
-            filename = f"merged_{task_id}_{index:03d}.wav"
-            output_path = os.path.join(output_dir, filename)
+            filename = f"merged_{task_id}_{index:03d}.mp3"
+            output_path = os.path.join(output_dir, filename)  # 明确赋值位置
 
-            segment.export(output_path,
-                           format="mp3",
-                           bitrate="192k",
-                           tags={
-                               'title': f"Merged {index}",
-                               'artist': 'Audio Processing System',
-                               'comment': f"Original: {start:.2f}-{end:.2f}s"
-                           })
+            # 6. 导出音频文件
+            segment.export(
+                output_path,
+                format="mp3",
+                codec="libmp3lame",
+                bitrate="192k",
+                tags={
+                    'title': f"Merged {index}",
+                    'artist': 'Audio Processing System',
+                    'comment': f"Original: {start:.2f}-{end:.2f}s"
+                }
+            )
+
+            # 7. 二次校验文件有效性
+            if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:
+                raise IOError("生成的音频文件无效或为空")
+
             return output_path
+
         except Exception as e:
-            raise RuntimeError(f"合并片段保存失败: {str(e)}")
+            # 增强错误信息
+            error_context = (
+                f"[文件: {original_path}] "
+                f"[时间范围: {start:.2f}s-{end:.2f}s] "
+                f"[任务ID: {task_id}] "
+                f"[索引: {index}]"
+            )
+            raise RuntimeError(f"合并片段保存失败: {error_context} → {str(e)}") from e
 
     def transcribe_para_former(self, file_path: str, task_id: str):
         result = self.transcribe_para_former_model.generate(
