@@ -524,3 +524,50 @@ async def download_all_segments(task_id: str):
         task_id=task_id,
         indices=indices
     )
+
+
+@router.delete("/segments/{task_id}", summary="批量删除指定分段")
+async def delete_segments(
+    task_id: str,
+    indices: str = Query(..., description="逗号分隔的分段索引列表")
+):
+    """删除指定任务的多个分段数据"""
+    try:
+        # 将传入的字符串转换为整数列表
+        segment_indices = [int(idx) for idx in indices.split(',') if idx.strip()]
+    except ValueError:
+        raise HTTPException(400, detail="索引格式错误，请使用逗号分隔的整数")
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # 构造IN子句
+                in_clause = ', '.join(['%s'] * len(segment_indices))
+                # 删除对应分段的数据
+                cursor.execute(
+                    f"DELETE FROM ai_task_results WHERE task_id = %s AND `index` IN ({in_clause})",
+                    (task_id,) + tuple(segment_indices)
+                )
+                conn.commit()
+
+                # 检查是否有行被删除
+                if cursor.rowcount == 0:
+                    raise HTTPException(404, detail=f"任务 {task_id} 下指定的分段不存在")
+
+                return {"message": f"任务 {task_id} 下索引为 {indices} 的分段已删除"}
+    except Exception as e:
+        raise HTTPException(500, detail=f"批量删除分段时出错: {str(e)}")
+
+@router.get("/speakers/{task_id}", summary="获取发音人列表")
+async def get_speakers(
+    task_id: str
+):
+    """获取指定任务的所有发音人列表"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT DISTINCT speaker FROM ai_task_results WHERE task_id = %s", (task_id,))
+                speakers = cursor.fetchall()
+                return [speaker['speaker'] for speaker in speakers]
+    except Exception as e:
+        raise HTTPException(500, detail=f"获取发音人列表时出错: {str(e)}")
