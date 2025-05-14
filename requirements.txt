@@ -37,3 +37,4 @@ x_transformers
 pyannote.audio==3.3.2
 oss2==2.19.1
 tenacity
+pymysql

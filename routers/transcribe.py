@@ -23,10 +23,10 @@ import re
 import zipfile
 from urllib.parse import quote
 
-
+from models.schemas import TranscribeResponse, Segment, TaskStatusResponse, PaginatedSegments, ChunkUploadResponse
 from services.audio_service import audio_service
-from utils.database import init_db, update_task, get_db_connection, get_task, create_task
 from utils.file_utils import cleanup_task
+from utils.mysql_db import init_db, get_db_connection, get_task, create_task, get_task_results, update_task_status
 
 TEMP_DIR = "temp_audio_files"
 router = APIRouter(tags=["音频切块"])
@@ -34,96 +34,6 @@ router = APIRouter(tags=["音频切块"])
 # 全局任务状态存储及锁
 tasks = {}
 tasks_lock = asyncio.Lock()
-
-
-class Segment(BaseModel):
-    index: Optional[int] = None
-    start: Optional[float] = None
-    end: Optional[float] = None
-    url: Optional[str] = None
-    text: Optional[str] = None
-    speaker: Optional[str] = None
-    suffix: Optional[str] = None
-
-
-class TaskStatusResponse(BaseModel):
-    task_id: Optional[str]
-    status: Optional[str]
-    message: Optional[str]
-    progress: Optional[int]
-    start_time: Optional[str]
-    complete_time: Optional[str]
-    duration: Optional[float]
-    error: Optional[str]
-    data: Optional[list[dict]] = None
-
-
-class TranscribeResponse(BaseModel):
-    task_id: str
-
-
-# 修改状态响应模型
-class TaskStatusResponse(BaseModel):
-    task_id: Optional[str]
-    status: Optional[str]
-    message: Optional[str]
-    progress: Optional[int]
-    start_time: Optional[str]
-    complete_time: Optional[str]
-    duration: Optional[float]
-    error: Optional[str]
-    data: Optional[List[Segment]] = None  # 新增数据字段
-
-
-async def update_task_status(task_data: dict):
-    """更新任务状态（数据库集成版）"""
-    with get_db_connection() as conn:
-        # 构造完整任务数据
-        full_data = {
-            "task_id": task_data["task_id"],
-            "status": task_data.get("status", "pending"),
-            "message": task_data.get("message", ""),
-            "progress": task_data.get("progress", 0),
-            "segments_path": task_data.get("segments_path"),
-            "start_time": task_data.get("start_time"),
-            "complete_time": task_data.get("complete_time"),
-            "duration": task_data.get("duration"),
-            "error": task_data.get("error")
-        }
-
-        # 处理时间计算
-        if full_data["status"] in ["completed", "failed"]:
-            full_data["complete_time"] = datetime.now().isoformat()
-            if full_data.get("start_time"):
-                start = datetime.fromisoformat(full_data["start_time"])
-                end = datetime.fromisoformat(full_data["complete_time"])
-                full_data["duration"] = round((end - start).total_seconds(), 2)
-
-        # 更新数据库
-        conn.execute("""
-        UPDATE tasks SET
-            status = ?,
-            message = ?,
-            progress = ?,
-            segments_path = ?,
-            start_time = ?,
-            complete_time = ?,
-            duration = ?,
-            error = ?
-        WHERE task_id = ?
-        """, (
-            full_data["status"],
-            full_data["message"],
-            full_data["progress"],
-            full_data["segments_path"],
-            full_data["start_time"],
-            full_data["complete_time"],
-            full_data["duration"],
-            full_data["error"],
-            full_data["task_id"]
-        ))
-        conn.commit()
-
 
 
 def convert_to_wav(input_path: str, output_path: str):
@@ -137,7 +47,7 @@ def convert_to_wav(input_path: str, output_path: str):
 async def process_audio_task(task_id: str, original_path: str, original_ext: str):
     task_dir = os.path.join(TEMP_DIR, task_id)
     try:
-        await update_task_status({
+        update_task_status({
             "task_id": task_id,
             "status": "processing",
             "message": "开始处理音频文件",
@@ -145,7 +55,7 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         })
 
         if original_ext.lower() != '.wav':
-            await update_task_status({
+            update_task_status({
                 "task_id": task_id,
                 "status": "processing",
                 "message": "正在转换音频格式",
@@ -160,7 +70,7 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
 
         # 语音识别阶段
 
-        await update_task_status({
+        update_task_status({
             "task_id": task_id,
             "status": "processing",
             "message": "开始语音识别",
@@ -169,17 +79,32 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         segments = await asyncio.to_thread(audio_service.transcribe_para_former, processing_path, task_id)
 
         # 结果保存阶段
-
-        await update_task_status({
+        update_task_status({
             "task_id": task_id,
             "status": "processing",
             "message": "保存识别结果",
             "progress": 70
         })
-        print(segments)
-        with open(os.path.join(task_dir, "segments.json"), "w", encoding="utf-8") as f:
-            json.dump(segments, f, ensure_ascii=False, indent=2)
-        await update_task_status({
+
+        # 将结果保存到数据库
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                for segment in segments:
+                    cursor.execute('''
+                        INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker,`url`)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ''', (
+                        task_id,
+                        segment.get("index"),
+                        segment.get("start"),
+                        segment.get("end"),
+                        segment.get("text"),
+                        segment.get("speaker"),
+                        segment.get("url")
+                    ))
+                conn.commit()
+
+        update_task_status({
             "task_id": task_id,
             "status": "completed",
             "message": "处理完成",
@@ -187,7 +112,7 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         })
 
     except Exception as e:
-        await update_task_status({
+        update_task_status({
             "task_id": task_id,
             "status": "failed",
             "message": "处理过程中发生错误",
@@ -213,21 +138,64 @@ async def startup():
     init_db()
 
 
-# 分片上传响应模型
-class ChunkUploadResponse(BaseModel):
-    task_id: str
-    chunk_number: int
-    uploaded_chunks: int
-    total_chunks: int
-    status: str  # partial/complete
+# 在merge_chunks接口中修改合并逻辑
+def merge_with_ffmpeg(task_dir: str, output_path: str):
+    """使用FFmpeg合并分片文件"""
+    # 生成分片列表文件
+    concat_list = os.path.join(task_dir, "concat_list.txt")
+    with open(concat_list, "w") as f:
+        for chunk in sorted(glob.glob(os.path.join(task_dir, "chunk_*.part"))):
+            f.write(f"file '{os.path.basename(chunk)}'\n")
+
+    # 使用FFmpeg合并
+    cmd = [
+        "ffmpeg",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concat_list,
+        "-c", "copy",
+        "-map_metadata", "0",
+        output_path
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        error_msg = f"FFmpeg合并失败: {e.stderr.decode()}"
+        raise RuntimeError(error_msg)
+    finally:
+        os.remove(concat_list)
+
+
+def validate_audio_file(file_path: str):
+    """使用FFprobe验证文件有效性"""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path
+    ]
+
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True)
+        duration = float(result.stdout.decode().strip())
+        if duration <= 0:
+            raise ValueError("无效的音频时长")
+        return True
+    except subprocess.CalledProcessError as e:
+        error_msg = f"文件验证失败: {e.stderr.decode()}"
+        raise RuntimeError(error_msg)
+
+
 # 分片上传接口
 @router.post("/upload_chunk", response_model=ChunkUploadResponse)
 async def upload_chunk(
-    file: UploadFile = File(...),
-    chunk_number: int = Form(...),
-    total_chunks: int = Form(...),
-    file_name: str = Form(...),        # 原始文件名
-    task_id: Optional[str] = Form(None),
+        file: UploadFile = File(...),
+        chunk_number: int = Form(...),
+        total_chunks: int = Form(...),
+        file_name: str = Form(...),  # 原始文件名
+        task_id: Optional[str] = Form(None),
 ):
     """上传文件分片"""
     # 生成或验证任务ID
@@ -273,57 +241,11 @@ async def upload_chunk(
     }
 
 
-# 在merge_chunks接口中修改合并逻辑
-def merge_with_ffmpeg(task_dir: str, output_path: str):
-    """使用FFmpeg合并分片文件"""
-    # 生成分片列表文件
-    concat_list = os.path.join(task_dir, "concat_list.txt")
-    with open(concat_list, "w") as f:
-        for chunk in sorted(glob.glob(os.path.join(task_dir, "chunk_*.part"))):
-            f.write(f"file '{os.path.basename(chunk)}'\n")
-
-    # 使用FFmpeg合并
-    cmd = [
-        "ffmpeg",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", concat_list,
-        "-c", "copy",
-        "-map_metadata", "0",
-        output_path
-    ]
-
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
-        error_msg = f"FFmpeg合并失败: {e.stderr.decode()}"
-        raise RuntimeError(error_msg)
-    finally:
-        os.remove(concat_list)
-def validate_audio_file(file_path: str):
-    """使用FFprobe验证文件有效性"""
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        file_path
-    ]
-
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True)
-        duration = float(result.stdout.decode().strip())
-        if duration <= 0:
-            raise ValueError("无效的音频时长")
-        return True
-    except subprocess.CalledProcessError as e:
-        error_msg = f"文件验证失败: {e.stderr.decode()}"
-        raise RuntimeError(error_msg)
 # 合并分片接口
 @router.post("/merge_chunks", response_model=TranscribeResponse)
 async def merge_chunks(
-    task_id: str = Form(...),
-    background_tasks: BackgroundTasks = None
+        task_id: str = Form(...),
+        background_tasks: BackgroundTasks = None
 ):
     task_dir = os.path.join(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
@@ -376,14 +298,14 @@ async def merge_chunks(
         raise HTTPException(500, f"文件处理失败: {str(e)}")
 
 
-def load_segments_if_completed(task):
-    if task[1] == "completed" and task[5]:
-        try:
-            with open(task[5], "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            return f"Error loading segments: {str(e)}"
-    return None
+def load_segments_if_completed(conn, task_id):
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM ai_task_results WHERE task_id = %s ORDER BY `index`", (task_id,))
+            results = cursor.fetchall()
+        return [Segment(**val) for val in results]
+    except Exception as e:
+        return f"Error loading segments: {str(e)}"
 
 
 @router.get("/tasks/{task_id}/status", response_model=TaskStatusResponse, summary="获取任务状态")
@@ -392,27 +314,21 @@ async def get_task_status(task_id: str):
         task = get_task(conn, task_id)
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
-
-        # 将数据库记录转换为响应模型
+        segments = load_segments_if_completed(conn, task_id) if task['status'] == "completed" else None
+        print(segments)
         return TaskStatusResponse(
-            task_id=task[0],
-            status=task[1],
-            message=task[2],
-            progress=task[3],
-            start_time=task[6],
-            complete_time=task[7],
-            duration=task[8],
-            error=task[9],
-            data=load_segments_if_completed(task)
+            task_id=task['task_id'],
+            status=task['status'],
+            message=task['message'],
+            progress=task['progress'],
+            start_time=task['start_time'],
+            complete_time=str(task['complete_time']),
+            duration=task['duration'],
+            error=task['error'],
+            data=segments
         )
 
-class PaginatedSegments(BaseModel):
-    items: List[Segment]
-    total: int
-    page: int
-    per_page: int
-    total_pages: int
-    search_hits: int = Field(..., description="包含关键字的记录总数")
+
 @router.get("/tasks/{task_id}/segments",
             response_model=PaginatedSegments,
             summary="获取任务结果",
@@ -423,96 +339,57 @@ class PaginatedSegments(BaseModel):
                 500: {"description": "结果文件读取失败"}
             })
 async def get_task_segments(
-    task_id: str,
-    keyword: Optional[str] = Query(None,
-                                  min_length=1,
-                                  description="模糊搜索关键字（匹配文本内容、类型等字段）"),
-    page: int = Query(1, ge=1),
-    per_page: int = Query(10, ge=1, le=100)
+        task_id: str,
+        keyword: Optional[str] = Query(None,
+                                       min_length=1,
+                                       description="模糊搜索关键字（匹配文本内容、类型等字段）"),
+        speaker: Optional[str] = Query(None,
+                                       description="筛选特定说话人（支持模糊匹配）"),
+        page: int = Query(1, ge=1),
+        per_page: int = Query(10, ge=1, le=100)
 ):
-    # 验证任务状态
+    """获取任务分段数据（增强版）"""
+
+    # 1. 验证任务状态
     with get_db_connection() as conn:
         task = get_task(conn, task_id)
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
-        if task[1] != "completed":
+        if task['status'] != "completed":
             raise HTTPException(status_code=425, detail="任务尚未完成")
-
-    # 构建文件路径
-    segments_path = os.path.join(TEMP_DIR, task_id, "segments.json")
-
-    try:
-        with open(segments_path, "r", encoding="utf-8") as f:
-            segments_data = json.load(f)  # 读取原始数据
-    except FileNotFoundError:
-        raise HTTPException(status_code=500, detail="结果文件不存在")
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="结果文件格式错误")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"结果读取失败: {str(e)}")
-
-    # 应用筛选条件
-    filtered_data = []
-    for seg_dict in segments_data:
-        # 关键字模糊匹配逻辑
-        if keyword:
-            # 定义搜索字段池（根据实际数据结构调整）
-            search_fields = {
-                'text': str(seg_dict.get('text', '')),  # 语音转文字内容
-                'type': str(seg_dict.get('segment_type', '')),  # 分段类型
-                'labels': '|'.join(seg_dict.get('labels', []))  # 标签列表
-            }
-            # 组合搜索文本
-            search_text = ' '.join(search_fields.values()).lower()
-            if keyword.lower() not in search_text:
-                continue
-
-        filtered_data.append(seg_dict)
-    search_hits = len(filtered_data) if keyword else None
-    # 分页处理
-    total = len(filtered_data)
-    total_pages = (total + per_page - 1) // per_page if per_page > 0 else 1
-    start = (page - 1) * per_page
-    end = start + per_page
-
-    # 处理超出范围的情况
-    if start >= total:
-        current_page_data = []
-    else:
-        current_page_data = filtered_data[start:end]
-
-    # 转换为Segment对象
-    items = [Segment(**seg) for seg in current_page_data]
-
+        # 查询结果数据
+        results = get_task_results(conn, task_id, keyword, speaker, page, per_page)
+    # 构建响应
     return PaginatedSegments(
-        items=items,
-        total=total,
-        page=page,
-        per_page=per_page,
-        total_pages=total_pages,
-        search_hits=search_hits or total
+        items=results["items"],
+        total=results["total"],
+        page=results["page"],
+        per_page=results["per_page"],
+        total_pages=results["total_pages"],
+        search_hits=results["total"]
     )
+
+
 @router.get("/download/single/{task_id}/{segment_index}", responses={
     200: {"content": {"audio/mpeg": {}}, "description": "返回MP3音频片段"}},
             summary="单音频下载")
 async def download_single_segment(task_id: str, segment_index: int):
-    await validate_task(task_id)
+    with get_db_connection() as conn:
+        task = get_task(conn, task_id)
+        if not task:
+            raise HTTPException(404, "任务不存在")
 
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    with open(os.path.join(task_dir, "segments.json"), "r", encoding="utf-8") as f:
-        segments = json.load(f)
+        # 获取原始文件路径
+        original_path = task["original_path"]  # 假设 original_path 是任务表中的第5个字段
 
-    if segment_index < 0 or segment_index >= len(segments):
-        raise HTTPException(400, "无效的片段索引")
+        # 获取分段信息
+        segments = get_task_results(conn, task_id)
+        if segment_index < 0 or segment_index >= len(segments["items"]):
+            raise HTTPException(400, "无效的片段索引")
 
-    segment = segments[segment_index]
+        segment = segments["items"][segment_index]
 
     try:
-        original_files = glob.glob(os.path.join(task_dir, "original_audio.*"))
-        if not original_files:
-            raise FileNotFoundError("找不到原始音频文件")
-        original_path = original_files[0]
-
         audio = AudioSegment.from_file(original_path)
     except Exception as e:
         raise HTTPException(500, f"音频加载失败: {str(e)}")
@@ -558,20 +435,19 @@ async def download_single_segment(task_id: str, segment_index: int):
 
 async def get_validated_segments(task_id: str):
     await validate_task(task_id)
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    try:
-        with open(os.path.join(task_dir, "segments.json"), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        raise HTTPException(500, f"加载分段信息失败: {str(e)}")
+    with get_db_connection() as conn:
+        segments = get_task_results(conn, task_id)
+    return segments
 
 
-async def get_original_audio(task_dir: str):
+async def get_original_audio(task_id: str):
+    with get_db_connection() as conn:
+        task = get_task(conn, task_id)
+        if not task:
+            raise HTTPException(404, "任务不存在")
+        original_path = task["original_path"]  # 假设 original_path 是任务表中的第5个字段
     try:
-        original_files = glob.glob(os.path.join(task_dir, "original_audio.*"))
-        if not original_files:
-            raise FileNotFoundError("找不到原始音频文件")
-        return AudioSegment.from_file(original_files[0])
+        return AudioSegment.from_file(original_path)
     except Exception as e:
         raise HTTPException(500, f"音频加载失败: {str(e)}")
 
@@ -587,18 +463,12 @@ async def download_bulk_segments(
         task_id: str,
         indices: str = Query(..., description="逗号分隔的片段索引列表")
 ):
-    """
-    批量下载多个音频片段（按说话人分类的ZIP压缩包）
-    功能特点：
-    1. 严格的任务状态验证
-    2. 智能文件名清理
-    3. 内存高效的流式响应
-    4. 完善的错误处理
-    """
     await validate_task(task_id)
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    segments = await get_validated_segments(task_id)
-    audio = await get_original_audio(task_dir)
+    with get_db_connection() as conn:
+        segments = get_task_results(conn, task_id)["items"]
+        task = get_task(conn, task_id)
+        original_path = task["original_path"]  # 假设 original_path 是任务表中的第5个字段
+    audio = await get_original_audio(task_id)
     try:
         indices_list = [int(idx) for idx in indices.split(',') if idx.strip()]
     except ValueError:
