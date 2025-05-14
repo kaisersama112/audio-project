@@ -434,7 +434,6 @@ async def download_single_segment(task_id: str, segment_index: int):
 
 
 async def get_validated_segments(task_id: str):
-    await validate_task(task_id)
     with get_db_connection() as conn:
         segments = get_task_results(conn, task_id)
     return segments
@@ -463,7 +462,6 @@ async def download_bulk_segments(
         task_id: str,
         indices: str = Query(..., description="逗号分隔的片段索引列表")
 ):
-    await validate_task(task_id)
     with get_db_connection() as conn:
         segments = get_task_results(conn, task_id)["items"]
         task = get_task(conn, task_id)
