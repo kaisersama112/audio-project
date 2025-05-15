@@ -86,11 +86,10 @@ class AudioService:
                 "local_path": segment_path
             }
 
-    def _merge_segments(self, raw_segments: list) -> list:
+    def merge_segments(self, raw_segments: list) -> list:
         """合并连续相同说话人的片段，包含最大合并数量限制"""
         if not raw_segments:
             return []
-
         merged = []
         current = {
             "start": raw_segments[0]["start"],
@@ -99,7 +98,6 @@ class AudioService:
             "spk": raw_segments[0].get("spk", "unknown"),
             "count": 1  # 添加计数器
         }
-
         for seg in raw_segments[1:]:
             # 合并条件：相同说话人 + 间隔 <0.5秒 + 合并次数未达上限
             can_merge = (
@@ -127,7 +125,6 @@ class AudioService:
                     "spk": seg.get("spk", "unknown"),
                     "count": 1  # 重置计数器
                 }
-
         merged.append({
             "start": current["start"],
             "end": current["end"],
@@ -199,6 +196,7 @@ class AudioService:
             raise RuntimeError(f"合并片段保存失败: {error_context} → {str(e)}") from e
 
     def transcribe_para_former(self, file_path: str, task_id: str):
+
         result = self.transcribe_para_former_model.generate(
             input=file_path,
             batch_size_s=1000,
@@ -207,9 +205,10 @@ class AudioService:
             punc=True,
             spk=True
         )
-
+        return result
+        """
         raw_segments = result[0]["sentence_info"]
-        merged_segments = self._merge_segments(raw_segments)
+        merged_segments = self.merge_segments(raw_segments)
 
         formatted_results = []
         with ThreadPoolExecutor(max_workers=5) as executor:
@@ -258,6 +257,57 @@ class AudioService:
                         "end": merged_seg["end"]
                     })
 
+        # 按开始时间排序
+        formatted_results.sort(key=lambda x: x["start"])
+        return formatted_results
+        """
+    def formatted_results_upload(self,merged_segments,file_path,task_id):
+        formatted_results = []
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+            for idx, merged_seg in enumerate(merged_segments):
+                try:
+                    segment_path = self._save_merged_segment(
+                        original_path=file_path,
+                        start=merged_seg["start"],
+                        end=merged_seg["end"],
+                        index=idx,
+                        task_id=task_id
+                    )
+                    futures.append((idx, executor.submit(
+                        self._upload_single_segment,
+                        segment_path=segment_path,
+                        task_id=task_id,
+                        seg=merged_seg,
+                        idx=idx
+                    )))
+
+                except Exception as e:
+                    formatted_results.append({
+                        "index": idx,
+                        "error": f"合并片段保存失败: {str(e)}",
+                        "start": merged_seg["start"],
+                        "end": merged_seg["end"]
+                    })
+
+            # 处理上传结果
+            for idx, future in futures:
+                try:
+                    upload_result = future.result()
+                    formatted_results.append(upload_result)
+
+                    # 上传成功后清理临时文件
+                    if upload_result.get("url") and os.path.exists(upload_result["local_path"]):
+                        os.remove(upload_result["local_path"])
+
+                except Exception as e:
+                    formatted_results.append({
+                        "index": idx,
+                        "error": f"合并片段上传失败: {str(e)}",
+                        "local_path": upload_result.get("local_path"),
+                        "start": merged_seg["start"],
+                        "end": merged_seg["end"]
+                    })
         # 按开始时间排序
         formatted_results.sort(key=lambda x: x["start"])
         return formatted_results

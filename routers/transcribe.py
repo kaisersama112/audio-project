@@ -22,19 +22,16 @@ import json
 import re
 import zipfile
 from urllib.parse import quote
-
+import concurrent.futures
 from models.schemas import TranscribeResponse, Segment, TaskStatusResponse, PaginatedSegments, ChunkUploadResponse
 from services.audio_service import audio_service
 from utils.file_utils import cleanup_task
-from utils.mysql_db import init_db, get_db_connection, get_task, create_task, get_task_results, update_task_status
-
+from utils.mysql_db import  get_db_connection, get_task, create_task, get_task_results, update_task_status
+import threading
 TEMP_DIR = "temp_audio_files"
+# 互斥锁
+text_recognition_lock = threading.Lock()
 router = APIRouter(tags=["音频切块"])
-
-# 全局任务状态存储及锁
-tasks = {}
-tasks_lock = asyncio.Lock()
-
 
 def convert_to_wav(input_path: str, output_path: str):
     try:
@@ -42,7 +39,6 @@ def convert_to_wav(input_path: str, output_path: str):
         audio.export(output_path, format="wav")
     except Exception as e:
         raise RuntimeError(f"格式转换失败: {str(e)}")
-
 
 async def process_audio_task(task_id: str, original_path: str, original_ext: str):
     task_dir = os.path.join(TEMP_DIR, task_id)
@@ -61,7 +57,6 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
                 "message": "正在转换音频格式",
                 "progress": 30
             })
-
             wav_path = os.path.join(task_dir, "audio.wav")
             await asyncio.to_thread(convert_to_wav, original_path, wav_path)
             processing_path = wav_path
@@ -69,15 +64,46 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             processing_path = original_path
 
         # 语音识别阶段
-
         update_task_status({
             "task_id": task_id,
             "status": "processing",
             "message": "开始语音识别",
             "progress": 40
         })
-        segments = await asyncio.to_thread(audio_service.transcribe_para_former, processing_path, task_id)
+        # 使用互斥锁确保文本识别阶段串行执行
+        with text_recognition_lock:
+            # 文本识别
+            update_task_status({
+                "task_id": task_id,
+                "status": "processing",
+                "message": "正在进行文本识别",
+                "progress": 50
+            })
+            result =await asyncio.to_thread(audio_service.transcribe_para_former, processing_path, task_id)
+            # 发音人合并
+            update_task_status({
+                "task_id": task_id,
+                "status": "processing",
+                "message": "合并发音人信息",
+                "progress": 60
+            })
+            raw_segments = result[0]["sentence_info"]
+            merged_segments=await asyncio.to_thread(audio_service.merge_segments, raw_segments)
 
+            # 格式化结果并上传
+            update_task_status({
+                "task_id": task_id,
+                "status": "processing",
+                "message": "格式化识别结果",
+                "progress": 70
+            })
+            segments =await asyncio.to_thread(audio_service.formatted_results_upload,merged_segments, processing_path, task_id)
+        update_task_status({
+            "task_id": task_id,
+            "status": "processing",
+            "message": "保存识别结果到数据库",
+            "progress": 80
+        })
         # 结果保存阶段
         update_task_status({
             "task_id": task_id,
@@ -119,32 +145,20 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "progress": 100,
             "error": str(e)
         })
-
-        shutil.rmtree(task_dir, ignore_errors=True)
-
-
-async def validate_task(task_id: str):
-    async with tasks_lock:
-        task_data = tasks.get(task_id)
-        if not task_data:
-            raise HTTPException(status_code=404, detail="任务不存在")
-        if task_data["status"] != "completed":
-            raise HTTPException(status_code=425, detail="任务尚未完成")
-        return task_data
-
-
-@router.on_event("startup")
-async def startup():
-    init_db()
-
-
-# 在merge_chunks接口中修改合并逻辑
+    # finally:
+    #     shutil.rmtree(task_dir, ignore_errors=True)
 def merge_with_ffmpeg(task_dir: str, output_path: str):
     """使用FFmpeg合并分片文件"""
     # 生成分片列表文件
+
     concat_list = os.path.join(task_dir, "concat_list.txt")
+    if os.path.exists(concat_list):
+        os.remove(concat_list)
+        os.remove(os.path.join(task_dir, "merged.wav"))
     with open(concat_list, "w") as f:
-        for chunk in sorted(glob.glob(os.path.join(task_dir, "chunk_*.part"))):
+        # 修改为查找 .wav 文件
+        for chunk in sorted(glob.glob(os.path.join(task_dir, "chunk_*.wav"))):
+            # 写入相对路径
             f.write(f"file '{os.path.basename(chunk)}'\n")
 
     # 使用FFmpeg合并
@@ -165,8 +179,6 @@ def merge_with_ffmpeg(task_dir: str, output_path: str):
         raise RuntimeError(error_msg)
     finally:
         os.remove(concat_list)
-
-
 def validate_audio_file(file_path: str):
     """使用FFprobe验证文件有效性"""
     cmd = [
@@ -197,11 +209,11 @@ async def upload_chunk(
         file_name: str = Form(...),  # 原始文件名
         task_id: Optional[str] = Form(None),
 ):
-    """上传文件分片"""
+    """上传文件分片，支持覆盖现有任务"""
     # 生成或验证任务ID
-    task_id = task_id
     if not task_id:
         raise HTTPException(400, "任务ID不能为空")
+
     task_dir = os.path.join(TEMP_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
 
@@ -219,19 +231,27 @@ async def upload_chunk(
         with open(os.path.join(task_dir, "metadata.json"), "w") as f:
             json.dump(metadata, f)
 
-    # 保存分片文件
-    chunk_path = os.path.join(task_dir, f"chunk_{chunk_number:04d}.part")
+    # 保存并转换分片文件为.wav
+    chunk_path = os.path.join(task_dir, f"chunk_{chunk_number:08d}.part")
+    wav_chunk_path = os.path.join(task_dir, f"chunk_{chunk_number:08d}.wav")
     try:
         # 流式写入（每次1MB）
         with open(chunk_path, "wb") as f:
             while content := await file.read(1024 * 1024):
                 f.write(content)
+
+        # 转换为.wav
+        await asyncio.to_thread(convert_to_wav, chunk_path, wav_chunk_path)
+
+        # 删除原始.part文件
+        os.remove(chunk_path)
+
     except Exception as e:
         shutil.rmtree(task_dir, ignore_errors=True)
-        raise HTTPException(500, f"分片保存失败: {str(e)}")
+        raise HTTPException(500, f"分片保存或转换失败: {str(e)}")
 
     # 更新已上传分片计数
-    uploaded = len([f for f in os.listdir(task_dir) if f.startswith("chunk_")])
+    uploaded = len([f for f in os.listdir(task_dir) if f.startswith("chunk_") and f.endswith(".wav")])
     return {
         "task_id": task_id,
         "chunk_number": chunk_number,
@@ -257,13 +277,12 @@ async def merge_chunks(
             metadata = json.load(f)
 
         # 验证分片完整性
-        chunk_files = glob.glob(os.path.join(task_dir, "chunk_*.part"))
+        chunk_files = glob.glob(os.path.join(task_dir, "chunk_*.wav"))
         if len(chunk_files) != metadata["total_chunks"]:
             raise HTTPException(400, "分片数量不匹配")
 
-        # 合并文件（使用FFmpeg）
-        original_ext = os.path.splitext(metadata["file_name"])[1]
-        original_path = os.path.join(task_dir, f"merged{original_ext or '.mp4'}")
+        # 合并.wav分片（使用FFmpeg）
+        original_path = os.path.join(task_dir, "merged.wav")
         merge_with_ffmpeg(task_dir, original_path)
 
         # 格式验证
@@ -283,8 +302,9 @@ async def merge_chunks(
             })
             conn.commit()
 
-        # 添加后台处理任务
-        background_tasks.add_task(process_audio_task, task_id, original_path, original_ext)
+        # 添加后台处理任务到线程池
+        background_tasks.add_task(process_audio_task, task_id, original_path, ".wav")
+        # 添加清理任务
         background_tasks.add_task(cleanup_task, task_id)
 
         return JSONResponse({
@@ -296,7 +316,6 @@ async def merge_chunks(
     except Exception as e:
         shutil.rmtree(task_dir, ignore_errors=True)
         raise HTTPException(500, f"文件处理失败: {str(e)}")
-
 
 def load_segments_if_completed(conn, task_id):
     try:
@@ -400,8 +419,8 @@ async def download_single_segment(task_id: str, segment_index: int):
     clean_text = re.sub(r'[\\/*?:"<>|]', '_', segment["text"])[:50]  # 限制长度
     enhanced_filename = f"{clean_text}_{time_suffix}.mp3" if clean_text else base_filename
 
-    start_ms = int(segment["start"] * 1000)
-    end_ms = int(segment["end"] * 1000)
+    start_ms = int(segment["start"])
+    end_ms = int(segment["end"])
 
     try:
         audio_segment = audio[start_ms:end_ms]
@@ -411,24 +430,17 @@ async def download_single_segment(task_id: str, segment_index: int):
             format="mp3",
             codec="libmp3lame",
             bitrate="192k",
-            tags={
-                'title': enhanced_filename,
-                'artist': 'Audio API'
-            }
         )
+
         buffer.seek(0)
     except Exception as e:
         raise HTTPException(500, f"音频导出失败: {str(e)}")
     safe_filename = quote(enhanced_filename, safe='')
     return StreamingResponse(
-        buffer,
+        buffer,  # 确保传递的是缓冲区对象
         media_type="audio/mpeg",
         headers={
-            "Content-Disposition":
-                f'attachment; filename="{safe_filename}"; '
-                f'filename*=UTF-8\'\'{safe_filename}',
-            "Content-Type": "audio/mpeg",
-            "X-Content-Type-Options": "nosniff"
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
         }
     )
 
