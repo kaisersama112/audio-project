@@ -272,6 +272,8 @@ async def merge_chunks(
         min_chunk_duration: float = Form(1.0),  # 最小分片时长，单位秒
         background_tasks: BackgroundTasks = None
 ):
+    if not min_chunk_duration or min_chunk_duration =="":
+        min_chunk_duration = 1.0
     print("task_id:",task_id)
     task_dir = os.path.join(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
@@ -462,7 +464,8 @@ async def download_bulk_segments(task_id: str, indices: str = Query(..., descrip
         zip_buffer,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="{task_id}_segments_bulk_{datetime.now().strftime("%Y%m%d%H%M%S")}.zip"'
+            "Content-Disposition": f'attachment; filename="{task_id}_segments_bulk_{datetime.now().strftime("%Y%m%d%H%M%S")}.zip"',
+            "Content-Length": str(zip_buffer.tell())
         }
     )
 
