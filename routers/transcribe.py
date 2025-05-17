@@ -33,7 +33,7 @@ from utils.mysql_db import  get_db_connection, get_task, create_task, get_task_r
 import threading
 TEMP_DIR = "temp_audio_files"
 # 互斥锁
-text_recognition_lock = threading.Lock()
+text_recognition_lock =  asyncio.Lock()
 router = APIRouter(tags=["音频切块"])
 
 def convert_to_wav(input_path: str, output_path: str):
@@ -43,7 +43,8 @@ def convert_to_wav(input_path: str, output_path: str):
     except Exception as e:
         raise RuntimeError(f"格式转换失败: {str(e)}")
 
-async def process_audio_task(task_id: str, original_path: str, original_ext: str):
+async def process_audio_task(task_id: str, original_path: str, original_ext: str,min_chunk_duration:float):
+
     task_dir = os.path.join(TEMP_DIR, task_id)
     try:
         update_task_status({
@@ -74,7 +75,7 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "progress": 40
         })
         # 使用互斥锁确保文本识别阶段串行执行
-        with text_recognition_lock:
+        async with text_recognition_lock:
             # 文本识别
             update_task_status({
                 "task_id": task_id,
@@ -82,25 +83,25 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
                 "message": "正在进行文本识别",
                 "progress": 50
             })
-            result =await asyncio.to_thread(audio_service.transcribe_para_former, processing_path, task_id)
-            # 发音人合并
-            update_task_status({
-                "task_id": task_id,
-                "status": "processing",
-                "message": "合并发音人信息",
-                "progress": 60
-            })
-            raw_segments = result[0]["sentence_info"]
-            merged_segments=await asyncio.to_thread(audio_service.merge_segments, raw_segments)
+            result =await asyncio.to_thread(audio_service.transcribe_para_former, processing_path)
+        # 发音人合并
+        update_task_status({
+            "task_id": task_id,
+            "status": "processing",
+            "message": "合并发音人信息",
+            "progress": 60
+        })
+        raw_segments = result[0]["sentence_info"]
+        merged_segments=await asyncio.to_thread(audio_service.merge_segments, raw_segments,min_chunk_duration)
 
-            # 格式化结果并上传
-            update_task_status({
-                "task_id": task_id,
-                "status": "processing",
-                "message": "格式化识别结果",
-                "progress": 70
-            })
-            segments =await asyncio.to_thread(audio_service.formatted_results_upload,merged_segments, processing_path, task_id)
+        # 格式化结果并上传
+        update_task_status({
+            "task_id": task_id,
+            "status": "processing",
+            "message": "格式化识别结果",
+            "progress": 70
+        })
+        segments =await asyncio.to_thread(audio_service.formatted_results_upload,merged_segments, processing_path, task_id)
         update_task_status({
             "task_id": task_id,
             "status": "processing",
@@ -268,31 +269,24 @@ async def upload_chunk(
 @router.post("/merge_chunks", response_model=TranscribeResponse)
 async def merge_chunks(
         task_id: str = Form(...),
+        min_chunk_duration: float = Form(1.0),  # 最小分片时长，单位秒
         background_tasks: BackgroundTasks = None
 ):
+    print("task_id:",task_id)
     task_dir = os.path.join(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
         raise HTTPException(404, "任务不存在")
 
     try:
-        # 加载元数据
         with open(os.path.join(task_dir, "metadata.json")) as f:
             metadata = json.load(f)
-
-        # 验证分片完整性
         chunk_files = glob.glob(os.path.join(task_dir, "chunk_*.wav"))
         if len(chunk_files) != metadata["total_chunks"]:
             raise HTTPException(400, "分片数量不匹配")
-
-        # 合并.wav分片（使用FFmpeg）
         original_path = os.path.join(task_dir, "merged.wav")
         merge_with_ffmpeg(task_dir, original_path)
-
-        # 格式验证
         if not validate_audio_file(original_path):
             raise HTTPException(400, "合并文件格式异常")
-
-        # 创建数据库记录
         with get_db_connection() as conn:
             create_task(conn, {
                 "task_id": task_id,
@@ -304,10 +298,7 @@ async def merge_chunks(
                 "start_time": None
             })
             conn.commit()
-
-        # 添加后台处理任务到线程池
-        background_tasks.add_task(process_audio_task, task_id, original_path, ".wav")
-        # 添加清理任务
+        background_tasks.add_task(process_audio_task, task_id, original_path, ".wav",min_chunk_duration)
         background_tasks.add_task(cleanup_task, task_id)
 
         return JSONResponse({
@@ -467,11 +458,12 @@ async def download_bulk_segments(task_id: str, indices: str = Query(..., descrip
                 zip_file.writestr(final_path, content)
 
     zip_buffer.seek(0)
-
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="classified_segments.zip"'}
+        headers={
+            "Content-Disposition": f'attachment; filename="{task_id}_segments_bulk_{datetime.now().strftime("%Y%m%d%H%M%S")}.zip"'
+        }
     )
 
 @router.get("/download/all/{task_id}", responses={

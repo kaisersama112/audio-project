@@ -86,8 +86,8 @@ class AudioService:
                 "local_path": segment_path
             }
 
-    def merge_segments(self, raw_segments: list) -> list:
-        """合并连续相同说话人的片段，包含最大合并数量限制"""
+    def merge_segments(self, raw_segments: list, min_chunk_duration: float) -> list:
+        """合并连续相同说话人的片段，基于最小时长要求"""
         if not raw_segments:
             return []
         merged = []
@@ -99,11 +99,12 @@ class AudioService:
             "count": 1  # 添加计数器
         }
         for seg in raw_segments[1:]:
-            # 合并条件：相同说话人 + 间隔 <0.5秒 + 合并次数未达上限
+            current_duration = (current["end"] - current["start"]) / 1000  # 计算当前片段时长（转为秒）
+            # 合并条件：相同说话人 + 间隔 <0.5秒 + 当前片段时长未达到最小要求
             can_merge = (
                     seg.get("spk") == current["spk"] and
-                    (seg["start"] - current["end"]) <= 0.5 and
-                    current["count"] < 5  # 控制最大合并数量
+                    (seg["start"] - current["end"]) <= 500 and  # 0.5秒转为毫秒
+                    current_duration < min_chunk_duration
             )
 
             if can_merge:
@@ -111,28 +112,47 @@ class AudioService:
                 current["text"] += " " + seg["text"].strip()
                 current["count"] += 1
             else:
-                # 保存时去除count字段
-                merged.append({
-                    "start": current["start"],
-                    "end": current["end"],
-                    "text": current["text"],
-                    "spk": current["spk"]
-                })
-                current = {
-                    "start": seg["start"],
-                    "end": seg["end"],
-                    "text": seg["text"].strip(),
-                    "spk": seg.get("spk", "unknown"),
-                    "count": 1  # 重置计数器
-                }
-        merged.append({
-            "start": current["start"],
-            "end": current["end"],
-            "text": current["text"],
-            "spk": current["spk"]
-        })
+                # 检查当前片段时长是否满足最小要求
+                if (current["end"] - current["start"]) / 1000 >= min_chunk_duration:
+                    # 保存当前片段（去除count字段）
+                    merged.append({
+                        "start": current["start"],
+                        "end": current["end"],
+                        "text": current["text"],
+                        "spk": current["spk"]
+                    })
+                    # 重置current为当前seg
+                    current = {
+                        "start": seg["start"],
+                        "end": seg["end"],
+                        "text": seg["text"].strip(),
+                        "spk": seg.get("spk", "unknown"),
+                        "count": 1
+                    }
+                else:
+                    # 如果不满足最小时长，继续尝试合并后续片段
+                    current["end"] = seg["end"]
+                    current["text"] += " " + seg["text"].strip()
+                    current["count"] += 1
+        # 处理最后一个片段
+        # 检查最后一个片段时长是否满足最小要求
+        if (current["end"] - current["start"]) / 1000 >= min_chunk_duration:
+            merged.append({
+                "start": current["start"],
+                "end": current["end"],
+                "text": current["text"],
+                "spk": current["spk"]
+            })
+        else:
+            # 如果最后一个片段不满足最小时长，可以考虑与前一个片段合并或单独处理
+            # 这里简单起见，直接添加到结果中，实际应用中可根据需求调整
+            merged.append({
+                "start": current["start"],
+                "end": current["end"],
+                "text": current["text"],
+                "spk": current["spk"]
+            })
         return merged
-
     def _save_merged_segment(self, original_path: str, start: float, end: float,
                              index: int, task_id: str) -> str:
         """保存合并后的长片段（修复变量引用问题）"""
@@ -195,72 +215,17 @@ class AudioService:
             )
             raise RuntimeError(f"合并片段保存失败: {error_context} → {str(e)}") from e
 
-    def transcribe_para_former(self, file_path: str, task_id: str):
+    def transcribe_para_former(self, file_path: str):
 
         result = self.transcribe_para_former_model.generate(
             input=file_path,
-            batch_size_s=1000,
+            batch_size_s=2000,
             hotword=",".join(hotword_list),
             vad=True,
             punc=True,
             spk=True
         )
         return result
-        """
-        raw_segments = result[0]["sentence_info"]
-        merged_segments = self.merge_segments(raw_segments)
-
-        formatted_results = []
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = []
-            for idx, merged_seg in enumerate(merged_segments):
-                try:
-                    segment_path = self._save_merged_segment(
-                        original_path=file_path,
-                        start=merged_seg["start"],
-                        end=merged_seg["end"],
-                        index=idx,
-                        task_id=task_id
-                    )
-                    futures.append((idx, executor.submit(
-                        self._upload_single_segment,
-                        segment_path=segment_path,
-                        task_id=task_id,
-                        seg=merged_seg,
-                        idx=idx
-                    )))
-
-                except Exception as e:
-                    formatted_results.append({
-                        "index": idx,
-                        "error": f"合并片段保存失败: {str(e)}",
-                        "start": merged_seg["start"],
-                        "end": merged_seg["end"]
-                    })
-
-            # 处理上传结果
-            for idx, future in futures:
-                try:
-                    upload_result = future.result()
-                    formatted_results.append(upload_result)
-
-                    # 上传成功后清理临时文件
-                    if upload_result.get("url") and os.path.exists(upload_result["local_path"]):
-                        os.remove(upload_result["local_path"])
-
-                except Exception as e:
-                    formatted_results.append({
-                        "index": idx,
-                        "error": f"合并片段上传失败: {str(e)}",
-                        "local_path": upload_result.get("local_path"),
-                        "start": merged_seg["start"],
-                        "end": merged_seg["end"]
-                    })
-
-        # 按开始时间排序
-        formatted_results.sort(key=lambda x: x["start"])
-        return formatted_results
-        """
     def formatted_results_upload(self,merged_segments,file_path,task_id):
         formatted_results = []
         with ThreadPoolExecutor(max_workers=5) as executor:
