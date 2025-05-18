@@ -40,7 +40,6 @@ class AudioService:
             spk_model="cam++",
             spk_model_revision="v2.0.2",
             batch_size=4,
-            device="cuda:0",
         )
         if torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs!")
@@ -227,7 +226,7 @@ class AudioService:
 
         result = self.transcribe_para_former_model.module.generate(
             input=file_path,
-            batch_size_s=2000,
+            batch_size_s=200,
             hotword=",".join(hotword_list),
             vad=True,
             punc=True,
