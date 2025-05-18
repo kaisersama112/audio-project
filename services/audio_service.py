@@ -27,6 +27,9 @@ class AudioService:
 
     def load_model(self):
         self.transcribe_para_former_model = AutoModel(
+            # batch_size_s=1,  # 单条音频的最大时长（秒），超过会分割成多个音频
+            # batch_size_threshold_s=1,  # 超过这个时长的音频会被分割成多个音频
+            # max_single_segment_time=1,  # 单个音频的最大时长（秒），超过会分割成多个音频
             model="paraformer-zh",
             model_revision="v2.0.4",
             vad_model="fsmn-vad",
@@ -35,7 +38,8 @@ class AudioService:
             punc_model_revision="v2.0.4",
             spk_model="cam++",
             spk_model_revision="v2.0.2",
-            batch_size=4
+            batch_size=4,
+            device="cuda:0,1",
         )
         print("Models loaded successfully")
 
