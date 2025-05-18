@@ -34,7 +34,8 @@ class AudioService:
             punc_model="ct-punc-c",
             punc_model_revision="v2.0.4",
             spk_model="cam++",
-            spk_model_revision="v2.0.2"
+            spk_model_revision="v2.0.2",
+            batch_size=4
         )
         print("Models loaded successfully")
 
@@ -222,8 +223,7 @@ class AudioService:
             hotword=",".join(hotword_list),
             vad=True,
             punc=True,
-            spk=True,
-            precision="float16"
+            spk=True
         )
         return result
     def formatted_results_upload(self,merged_segments,file_path,task_id):
