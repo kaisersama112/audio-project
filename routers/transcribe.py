@@ -313,7 +313,7 @@ async def merge_chunks(
         shutil.rmtree(task_dir, ignore_errors=True)
         # 删除记录
         with get_db_connection() as conn:
-            conn.execute("DELETE FROM ai_tasks WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM ai_tasks WHERE task_id = %s", (task_id,))
             conn.commit()
         raise HTTPException(500, f"文件处理失败: {str(e)}")
 
