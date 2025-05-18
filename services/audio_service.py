@@ -34,8 +34,7 @@ class AudioService:
             punc_model="ct-punc-c",
             punc_model_revision="v2.0.4",
             spk_model="cam++",
-            spk_model_revision="v2.0.2",
-            batch_size=4
+            spk_model_revision="v2.0.2"
         )
         print("Models loaded successfully")
 
