@@ -44,7 +44,7 @@ class AudioService:
         )
         if torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs!")
-            model = torch.nn.DataParallel(self.transcribe_para_former_model, device_ids=[0, 1])  # 指定 GPU 索引
+            self.transcribe_para_former_model = torch.nn.DataParallel(self.transcribe_para_former_model, device_ids=[0, 1])  # 指定 GPU 索引
         print("Models loaded successfully")
 
     def _save_segment(self, original_path: str, seg: dict, index: int, task_id: str) -> str:
