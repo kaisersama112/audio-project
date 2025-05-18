@@ -223,7 +223,8 @@ class AudioService:
             hotword=",".join(hotword_list),
             vad=True,
             punc=True,
-            spk=True
+            spk=True,
+            precision="float16"
         )
         return result
     def formatted_results_upload(self,merged_segments,file_path,task_id):
