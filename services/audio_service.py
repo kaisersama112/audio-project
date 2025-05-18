@@ -35,7 +35,7 @@ class AudioService:
             punc_model_revision="v2.0.4",
             spk_model="cam++",
             spk_model_revision="v2.0.2",
-            batch_size=2,
+            batch_size=4
         )
         print("Models loaded successfully")
 
@@ -219,7 +219,7 @@ class AudioService:
 
         result = self.transcribe_para_former_model.generate(
             input=file_path,
-            batch_size_s=500,
+            batch_size_s=2000,
             hotword=",".join(hotword_list),
             vad=True,
             punc=True,
