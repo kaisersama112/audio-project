@@ -8,6 +8,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
 
+import torch
 from pydub import AudioSegment
 
 from config import settings, hotword_list
@@ -39,8 +40,11 @@ class AudioService:
             spk_model="cam++",
             spk_model_revision="v2.0.2",
             batch_size=4,
-            device="cuda:0,1",
+            device="cuda:0",
         )
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs!")
+            model = torch.nn.DataParallel(self.transcribe_para_former_model, device_ids=[0, 1])  # 指定 GPU 索引
         print("Models loaded successfully")
 
     def _save_segment(self, original_path: str, seg: dict, index: int, task_id: str) -> str:
