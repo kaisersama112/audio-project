@@ -225,7 +225,7 @@ class AudioService:
 
     def transcribe_para_former(self, file_path: str):
 
-        result = self.transcribe_para_former_model.generate(
+        result = self.transcribe_para_former_model.module.generate(
             input=file_path,
             batch_size_s=2000,
             hotword=",".join(hotword_list),
