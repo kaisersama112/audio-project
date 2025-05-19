@@ -29,12 +29,13 @@ import concurrent.futures
 from models.schemas import TranscribeResponse, Segment, TaskStatusResponse, PaginatedSegments, ChunkUploadResponse
 from services.audio_service import audio_service
 from utils.file_utils import cleanup_task
-from utils.mysql_db import  get_db_connection, get_task, create_task, get_task_results, update_task_status
+from utils.mysql_db import get_db_connection, get_task, create_task, get_task_results, update_task_status
 import threading
+
 TEMP_DIR = "temp_audio_files"
-# 互斥锁
-text_recognition_lock =  asyncio.Lock()
+
 router = APIRouter(tags=["音频切块"])
+
 
 def convert_to_wav(input_path: str, output_path: str):
     try:
@@ -43,8 +44,8 @@ def convert_to_wav(input_path: str, output_path: str):
     except Exception as e:
         raise RuntimeError(f"格式转换失败: {str(e)}")
 
-async def process_audio_task(task_id: str, original_path: str, original_ext: str,min_chunk_duration:float):
 
+async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float):
     task_dir = os.path.join(TEMP_DIR, task_id)
     try:
         update_task_status({
@@ -74,16 +75,15 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "message": "开始语音识别",
             "progress": 40
         })
-        # 使用互斥锁确保文本识别阶段串行执行
-        async with text_recognition_lock:
-            # 文本识别
-            update_task_status({
-                "task_id": task_id,
-                "status": "processing",
-                "message": "正在进行文本识别",
-                "progress": 50
-            })
-            result =await asyncio.to_thread(audio_service.transcribe_para_former, processing_path)
+
+        # 文本识别
+        update_task_status({
+            "task_id": task_id,
+            "status": "processing",
+            "message": "正在进行文本识别",
+            "progress": 50
+        })
+        result = await asyncio.to_thread(audio_service.transcribe_para_former, processing_path)
         # 发音人合并
         update_task_status({
             "task_id": task_id,
@@ -92,7 +92,7 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "progress": 60
         })
         raw_segments = result[0]["sentence_info"]
-        merged_segments=await asyncio.to_thread(audio_service.merge_segments, raw_segments,min_chunk_duration)
+        merged_segments = await asyncio.to_thread(audio_service.merge_segments, raw_segments, min_chunk_duration)
 
         # 格式化结果并上传
         update_task_status({
@@ -101,7 +101,8 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "message": "格式化识别结果",
             "progress": 70
         })
-        segments =await asyncio.to_thread(audio_service.formatted_results_upload,merged_segments, processing_path, task_id)
+        segments = await asyncio.to_thread(audio_service.formatted_results_upload, merged_segments, processing_path,
+                                           task_id)
         update_task_status({
             "task_id": task_id,
             "status": "processing",
@@ -151,6 +152,8 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         })
     finally:
         shutil.rmtree(task_dir, ignore_errors=True)
+
+
 def merge_with_ffmpeg(task_dir: str, output_path: str):
     """使用FFmpeg合并分片文件"""
     # 生成分片列表文件
@@ -183,6 +186,8 @@ def merge_with_ffmpeg(task_dir: str, output_path: str):
         raise RuntimeError(error_msg)
     finally:
         os.remove(concat_list)
+
+
 def validate_audio_file(file_path: str):
     """使用FFprobe验证文件有效性"""
     cmd = [
@@ -272,9 +277,9 @@ async def merge_chunks(
         min_chunk_duration: float = Form(1.0),  # 最小分片时长，单位秒
         background_tasks: BackgroundTasks = None
 ):
-    if not min_chunk_duration or min_chunk_duration =="":
+    if not min_chunk_duration or min_chunk_duration == "":
         min_chunk_duration = 1.0
-    print("task_id:",task_id)
+    print("task_id:", task_id)
     task_dir = os.path.join(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
         raise HTTPException(404, "任务不存在")
@@ -300,7 +305,7 @@ async def merge_chunks(
                 "start_time": None
             })
             conn.commit()
-        background_tasks.add_task(process_audio_task, task_id, original_path, ".wav",min_chunk_duration)
+        background_tasks.add_task(process_audio_task, task_id, original_path, ".wav", min_chunk_duration)
         background_tasks.add_task(cleanup_task, task_id)
 
         return JSONResponse({
@@ -316,6 +321,7 @@ async def merge_chunks(
             conn.execute("DELETE FROM ai_tasks WHERE task_id = %s", (task_id,))
             conn.commit()
         raise HTTPException(500, f"文件处理失败: {str(e)}")
+
 
 def load_segments_if_completed(conn, task_id):
     try:
@@ -426,7 +432,7 @@ async def download_single_segment(task_id: str, segment_index: int):
 
 @router.get("/download/bulk/{task_id}", responses={
     200: {"content": {"application/zip": {}}, "description": "返回ZIP压缩包"}},
-    summary="多音频下载")
+            summary="多音频下载")
 async def download_bulk_segments(task_id: str, indices: str = Query(..., description="逗号分隔的片段索引列表")):
     with get_db_connection() as conn:
         segments = get_task_results(conn, task_id)["items"]
@@ -473,9 +479,10 @@ async def download_bulk_segments(task_id: str, indices: str = Query(..., descrip
         }
     )
 
+
 @router.get("/download/all/{task_id}", responses={
     200: {"content": {"application/zip": {}}, "description": "返回全部音频"}},
-    summary="全部音频下载")
+            summary="全部音频下载")
 async def download_all_segments(task_id: str):
     with get_db_connection() as conn:
         segments = get_task_results(conn, task_id)["items"]
@@ -492,8 +499,8 @@ async def download_all_segments(task_id: str):
 
 @router.delete("/segments/{task_id}", summary="批量删除指定分段")
 async def delete_segments(
-    task_id: str,
-    indices: str = Query(..., description="逗号分隔的分段索引列表")
+        task_id: str,
+        indices: str = Query(..., description="逗号分隔的分段索引列表")
 ):
     """删除指定任务的多个分段数据"""
     try:
@@ -522,9 +529,10 @@ async def delete_segments(
     except Exception as e:
         raise HTTPException(500, detail=f"批量删除分段时出错: {str(e)}")
 
+
 @router.get("/speakers/{task_id}", summary="获取发音人列表")
 async def get_speakers(
-    task_id: str
+        task_id: str
 ):
     """获取指定任务的所有发音人列表"""
     try:

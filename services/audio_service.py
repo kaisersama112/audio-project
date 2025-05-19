@@ -20,13 +20,14 @@ from services.oss_service import oss_service
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
-
+lock = threading.Lock()
 class AudioService:
     def __init__(self):
         self.transcribe_para_former_model = None
         self.model = None
 
     def load_model(self):
+
         self.transcribe_para_former_model = AutoModel(
             # batch_size_s=1,  # 单条音频的最大时长（秒），超过会分割成多个音频
             # batch_size_threshold_s=1,  # 超过这个时长的音频会被分割成多个音频
@@ -41,9 +42,7 @@ class AudioService:
             spk_model_revision="v2.0.2",
             batch_size=4,
         )
-        if torch.cuda.device_count() > 1:
-            print(f"Using {torch.cuda.device_count()} GPUs!")
-            self.transcribe_para_former_model = torch.nn.DataParallel(self.transcribe_para_former_model, device_ids=[0, 1])  # 指定 GPU 索引
+
         print("Models loaded successfully")
 
     def _save_segment(self, original_path: str, seg: dict, index: int, task_id: str) -> str:
@@ -223,16 +222,16 @@ class AudioService:
             raise RuntimeError(f"合并片段保存失败: {error_context} → {str(e)}") from e
 
     def transcribe_para_former(self, file_path: str):
-
-        result = self.transcribe_para_former_model.module.generate(
-            input=file_path,
-            batch_size_s=200,
-            hotword=",".join(hotword_list),
-            vad=True,
-            punc=True,
-            spk=True
-        )
-        return result
+        with lock:
+            result = self.transcribe_para_former_model.generate(
+                input=file_path,
+                batch_size_s=2000,
+                hotword=",".join(hotword_list),
+                vad=True,
+                punc=True,
+                spk=True
+            )
+            return result
     def formatted_results_upload(self,merged_segments,file_path,task_id):
         formatted_results = []
         with ThreadPoolExecutor(max_workers=5) as executor:
