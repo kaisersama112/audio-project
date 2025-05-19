@@ -75,7 +75,7 @@ class OSSService:
 
 
 oss_service = OSSService()
-#
+
 # if __name__ == '__main__':
 #
 #     data=oss_service.upload_file(
