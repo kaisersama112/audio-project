@@ -13,7 +13,7 @@ cn2an
 pypinyin
 pyopenjtalk>=0.3.4
 g2p_en
-torchaudio~=2.4.1+cu118
+torchaudio
 modelscope==1.10.0
 sentencepiece
 transformers
@@ -26,7 +26,7 @@ split-lang
 Faster_Whisper
 wordsegment
 rotary_embedding_torch
-ToJyutping 
+ToJyutping
 g2pk2
 ko_pron
 opencc; sys_platform != 'linux'
@@ -36,12 +36,5 @@ fastapi<0.112.2
 x_transformers
 pyannote.audio==3.3.2
 oss2==2.19.1
-tenacity~=9.0.0
-pymysql~=1.1.1
-torch~=2.4.1+cu118
-soundfile~=0.12.1
-pydantic~=2.11.4
-uvicorn~=0.34.2
-apscheduler~=3.11.0
-httpx~=0.28.1
-pydub~=0.25.1
+tenacity
+pymysql
