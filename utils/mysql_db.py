@@ -15,13 +15,25 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from services.audio_service import audio_service
-
+# 测试站
+"""
 DB_CONFIG = {
     "host": "123.57.150.136",
     "user": "broadcast_ai",
     "password": "eMRtryH6LcpidGRR",
     "database": "broadcast_ai",
     "port": 3306,
+    "charset": "utf8mb4",
+    "cursorclass": DictCursor
+}
+"""
+# 正式站
+DB_CONFIG = {
+    "host": "1.14.127.39",
+    "user": "broadcast_ai",
+    "password": "2Afsp2cGCdk7dRf8",
+    "database": "broadcast_ai",
+    "port": 3388,
     "charset": "utf8mb4",
     "cursorclass": DictCursor
 }
