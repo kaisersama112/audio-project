@@ -30,9 +30,6 @@ class AudioService:
     def load_model(self):
 
         self.transcribe_para_former_model = AutoModel(
-            # batch_size_s=1,  # 单条音频的最大时长（秒），超过会分割成多个音频
-            # batch_size_threshold_s=1,  # 超过这个时长的音频会被分割成多个音频
-            # max_single_segment_time=1,  # 单个音频的最大时长（秒），超过会分割成多个音频
             model="paraformer-zh",
             model_revision="v2.0.4",
             vad_model="fsmn-vad",
@@ -46,6 +43,19 @@ class AudioService:
 
         print("Models loaded successfully")
 
+    def transcribe_para_former(self, file_path: str):
+        with lock:
+            result = self.transcribe_para_former_model.generate(
+                input=file_path,
+                max_single_segment_time=1000*10,  # 单个文件的最大处理时间ms
+                batch_size_s=500,  # 单个文件的最大处理时间 s
+                batch_size_threshold_s=0.1,  # 单个文件的最小处理时间 s
+                hotword=",".join(hotword_list),
+                vad=True,
+                punc=True,
+                spk=True
+            )
+            return result
     def _save_segment(self, original_path: str, seg: dict, index: int, task_id: str) -> str:
         """保存音频片段到临时文件"""
         audio = AudioSegment.from_file(original_path)
@@ -222,17 +232,7 @@ class AudioService:
             )
             raise RuntimeError(f"合并片段保存失败: {error_context} → {str(e)}") from e
 
-    def transcribe_para_former(self, file_path: str):
-        with lock:
-            result = self.transcribe_para_former_model.generate(
-                input=file_path,
-                batch_size_s=2000,
-                hotword=",".join(hotword_list),
-                vad=True,
-                punc=True,
-                spk=True
-            )
-            return result
+
     def formatted_results_upload(self,merged_segments,file_path,task_id):
         formatted_results = []
         with ThreadPoolExecutor(max_workers=5) as executor:
