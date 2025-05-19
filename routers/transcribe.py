@@ -101,37 +101,40 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "message": "格式化识别结果",
             "progress": 70
         })
-        segments = await asyncio.to_thread(audio_service.formatted_results_upload, merged_segments, processing_path,
-                                           task_id)
+        # 保存所有分片到本地
+        segments_paths =await asyncio.to_thread(audio_service.split_segments, merged_segments, processing_path,task_id)
+        # 上传分片到OSS
+        """
+        segments = await asyncio.to_thread(audio_service.upload_segments, segments_paths, task_id)
+        """
         update_task_status({
             "task_id": task_id,
             "status": "processing",
             "message": "保存识别结果到数据库",
-            "progress": 80
+            "progress": 70
         })
         # 结果保存阶段
         update_task_status({
             "task_id": task_id,
             "status": "processing",
             "message": "保存识别结果",
-            "progress": 70
+            "progress": 80
         })
-
-        # 将结果保存到数据库
+        from config import base_url
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                for segment in segments:
+                for idx, segment_path, merged_seg in segments_paths:
                     cursor.execute('''
                         INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker,`url`)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ''', (
                         task_id,
-                        segment.get("index"),
-                        segment.get("start"),
-                        segment.get("end"),
-                        segment.get("text"),
-                        segment.get("speaker"),
-                        segment.get("url")
+                        idx,
+                        merged_seg.get("start"),
+                        merged_seg.get("end"),
+                        merged_seg.get("text"),
+                        merged_seg.get("speaker"),
+                        base_url+segment_path.replace("\\","/")
                     ))
                 conn.commit()
 
@@ -141,6 +144,31 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "message": "处理完成",
             "progress": 100
         })
+        # 将结果保存到数据库
+
+        # with get_db_connection() as conn:
+        #     with conn.cursor() as cursor:
+        #         for segment in segments:
+        #             cursor.execute('''
+        #                 INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker,`url`)
+        #                 VALUES (%s, %s, %s, %s, %s, %s, %s)
+        #             ''', (
+        #                 task_id,
+        #                 segment.get("index"),
+        #                 segment.get("start"),
+        #                 segment.get("end"),
+        #                 segment.get("text"),
+        #                 segment.get("speaker"),
+        #                 segment.get("url")
+        #             ))
+        #         conn.commit()
+        #
+        # update_task_status({
+        #     "task_id": task_id,
+        #     "status": "completed",
+        #     "message": "处理完成",
+        #     "progress": 100
+        # })
 
     except Exception as e:
         update_task_status({
@@ -150,8 +178,8 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "progress": 100,
             "error": str(e)
         })
-    finally:
-        shutil.rmtree(task_dir, ignore_errors=True)
+    # finally:
+        # shutil.rmtree(task_dir, ignore_errors=True)
 
 
 def merge_with_ffmpeg(task_dir: str, output_path: str):
@@ -315,7 +343,7 @@ async def merge_chunks(
         })
 
     except Exception as e:
-        shutil.rmtree(task_dir, ignore_errors=True)
+        # shutil.rmtree(task_dir, ignore_errors=True)
         # 删除记录
         with get_db_connection() as conn:
             conn.execute("DELETE FROM ai_tasks WHERE task_id = %s", (task_id,))

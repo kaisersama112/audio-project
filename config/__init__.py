@@ -42,3 +42,6 @@ hotword_list = [
     "号链接",
     "价格"
 ]
+
+
+base_url="https://audio.cqhuancheng.cn/"

@@ -104,6 +104,9 @@ class AudioService:
             }
 
     def formatted_results_upload(self,merged_segments,file_path,task_id):
+        """
+        合并片段并上传到OSS，返回格式化后的结果
+        """
         formatted_results = []
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = []
@@ -282,6 +285,63 @@ class AudioService:
                 f"[索引: {index}]"
             )
             raise RuntimeError(f"合并片段保存失败: {error_context} → {str(e)}") from e
+
+    def split_segments(self, merged_segments, file_path, task_id):
+        segments_paths = []
+        for idx, merged_seg in enumerate(merged_segments):
+            try:
+                segment_path = self._save_merged_segment(
+                    original_path=file_path,
+                    start=merged_seg["start"],
+                    end=merged_seg["end"],
+                    index=idx,
+                    task_id=task_id
+                )
+                # 生成URL
+                segment_url = f"{segment_path}"
+                segments_paths.append((idx, segment_url, merged_seg))
+            except Exception as e:
+                print(f"保存片段 {idx} 失败: {str(e)}")
+        return segments_paths
+
+    def upload_segments(self, segments_paths, task_id):
+        """
+        上传分片
+        """
+        formatted_results = []
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+            for idx, segment_path, merged_seg in segments_paths:
+                futures.append((idx, executor.submit(
+                    self._upload_single_segment,
+                    segment_path=segment_path,
+                    task_id=task_id,
+                    seg=merged_seg,
+                    idx=idx
+                )))
+
+            # 处理上传结果
+            for idx, future in futures:
+                try:
+                    upload_result = future.result()
+                    formatted_results.append(upload_result)
+
+                    # 上传成功后清理临时文件
+                    if upload_result.get("url") and os.path.exists(upload_result["local_path"]):
+                        os.remove(upload_result["local_path"])
+
+                except Exception as e:
+                    formatted_results.append({
+                        "index": idx,
+                        "error": f"合并片段上传失败: {str(e)}",
+                        "local_path": upload_result.get("local_path"),
+                        "start": merged_seg["start"],
+                        "end": merged_seg["end"]
+                    })
+
+        # 按开始时间排序
+        formatted_results.sort(key=lambda x: x.get("start", 0))
+        return formatted_results
 
 
 
