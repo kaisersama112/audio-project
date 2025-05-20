@@ -45,6 +45,24 @@ def convert_to_wav(input_path: str, output_path: str):
         raise RuntimeError(f"格式转换失败: {str(e)}")
 
 
+def split_progress_callback(task_id, progress, message):
+    update_task_status({
+        "task_id": task_id,
+        "status": "processing",
+        "message": f"保存片段: {message}",
+        "progress": 60 + int(progress * 0.3)  # 假设保存占总进度的30%
+    })
+
+
+def merge_progress_callback(task_id, progress, message):
+    update_task_status({
+        "task_id": task_id,
+        "status": "processing",
+        "message": f"合并片段: {message}",
+        "progress": 30 + int(progress * 0.3)
+    })
+
+
 async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float):
     task_dir = os.path.join(TEMP_DIR, task_id)
     try:
@@ -60,28 +78,26 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
                 "task_id": task_id,
                 "status": "processing",
                 "message": "正在转换音频格式",
-                "progress": 30
+                "progress": 10
             })
             wav_path = os.path.join(task_dir, "audio.wav")
             await asyncio.to_thread(convert_to_wav, original_path, wav_path)
             processing_path = wav_path
         else:
             processing_path = original_path
-
-        # 语音识别阶段
-        update_task_status({
-            "task_id": task_id,
-            "status": "processing",
-            "message": "开始语音识别",
-            "progress": 40
-        })
+            update_task_status({
+                "task_id": task_id,
+                "status": "processing",
+                "message": "音频格式无需转换",
+                "progress": 10
+            })
 
         # 文本识别
         update_task_status({
             "task_id": task_id,
             "status": "processing",
-            "message": "正在进行文本识别",
-            "progress": 50
+            "message": "开始语音识别",
+            "progress": 20
         })
         result = await asyncio.to_thread(audio_service.transcribe_para_former, processing_path)
         # 发音人合并
@@ -89,20 +105,32 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "task_id": task_id,
             "status": "processing",
             "message": "合并发音人信息",
-            "progress": 60
+            "progress": 30
         })
         raw_segments = result[0]["sentence_info"]
-        merged_segments = await asyncio.to_thread(audio_service.merge_segments, raw_segments, min_chunk_duration)
+        merged_segments = await asyncio.to_thread(
+            audio_service.merge_segments,
+            task_id,
+            raw_segments,
+            min_chunk_duration,
+            merge_progress_callback
+        )
 
-        # 格式化结果并上传
+        # 格式化结果
         update_task_status({
             "task_id": task_id,
             "status": "processing",
             "message": "格式化识别结果",
-            "progress": 70
+            "progress": 60
         })
         # 保存所有分片到本地
-        segments_paths =await asyncio.to_thread(audio_service.split_segments, merged_segments, processing_path,task_id)
+        segments_paths = await asyncio.to_thread(
+            audio_service.split_segments,
+            merged_segments,
+            processing_path,
+            task_id,
+            split_progress_callback
+        )
         # 上传分片到OSS
         """
         segments = await asyncio.to_thread(audio_service.upload_segments, segments_paths, task_id)
@@ -111,14 +139,14 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "task_id": task_id,
             "status": "processing",
             "message": "保存识别结果到数据库",
-            "progress": 70
+            "progress": 90
         })
         # 结果保存阶段
         update_task_status({
             "task_id": task_id,
             "status": "processing",
             "message": "保存识别结果",
-            "progress": 80
+            "progress": 95
         })
         from config import base_url
         with get_db_connection() as conn:
@@ -133,8 +161,8 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
                         merged_seg.get("start"),
                         merged_seg.get("end"),
                         merged_seg.get("text"),
-                        merged_seg.get("speaker"),
-                        base_url+segment_path.replace("\\","/")
+                        str(merged_seg.get("spk")),
+                        base_url + segment_path.replace("\\", "/")
                     ))
                 conn.commit()
 
@@ -178,8 +206,6 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             "progress": 100,
             "error": str(e)
         })
-    # finally:
-        # shutil.rmtree(task_dir, ignore_errors=True)
 
 
 def merge_with_ffmpeg(task_dir: str, output_path: str):
@@ -302,11 +328,11 @@ async def upload_chunk(
 @router.post("/merge_chunks", response_model=TranscribeResponse)
 async def merge_chunks(
         task_id: str = Form(...),
-        min_chunk_duration: float = Form(1.0),  # 最小分片时长，单位秒
+        min_chunk_duration: float = Form(3.0),  # 最小分片时长，单位秒
         background_tasks: BackgroundTasks = None
 ):
     if not min_chunk_duration or min_chunk_duration == "":
-        min_chunk_duration = 1.0
+        min_chunk_duration = 3.0
     print("task_id:", task_id)
     task_dir = os.path.join(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):

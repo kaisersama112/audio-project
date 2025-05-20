@@ -5,14 +5,14 @@
 @Author  ：panshangguo
 @Date    ：29/4/2025 下午4:51
 """
+import concurrent
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
 
-import torch
 from pydub import AudioSegment
 
-from config import settings, hotword_list
+from config import hotword_list
 
 from funasr import AutoModel
 import os
@@ -22,6 +22,8 @@ from services.oss_service import oss_service
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 lock = threading.Lock()
+
+
 class AudioService:
     def __init__(self):
         self.transcribe_para_former_model = None
@@ -47,7 +49,7 @@ class AudioService:
         with lock:
             result = self.transcribe_para_former_model.generate(
                 input=file_path,
-                max_single_segment_time=1000*10,  # 单个文件的最大处理时间ms
+                max_single_segment_time=1000 * 10,  # 单个文件的最大处理时间ms
                 batch_size_s=500,  # 单个文件的最大处理时间 s
                 batch_size_threshold_s=0.1,  # 单个文件的最小处理时间 s
                 hotword=",".join(hotword_list),
@@ -56,6 +58,7 @@ class AudioService:
                 spk=True
             )
             return result
+
     def _save_segment(self, original_path: str, seg: dict, index: int, task_id: str) -> str:
         """保存音频片段到临时文件"""
         audio = AudioSegment.from_file(original_path)
@@ -103,7 +106,7 @@ class AudioService:
                 "local_path": segment_path
             }
 
-    def formatted_results_upload(self,merged_segments,file_path,task_id):
+    def formatted_results_upload(self, merged_segments, file_path, task_id):
         """
         合并片段并上传到OSS，返回格式化后的结果
         """
@@ -157,11 +160,13 @@ class AudioService:
         formatted_results.sort(key=lambda x: x["start"])
         return formatted_results
 
-    def merge_segments(self, raw_segments: list, min_chunk_duration: float) -> list:
+    def merge_segments(self, task_id: str, raw_segments: list, min_chunk_duration: float, progress_callback) -> list:
         """合并连续相同说话人的片段，基于最小时长要求"""
         if not raw_segments:
+            progress_callback(task_id, 100, "无片段需要合并")
             return []
         merged = []
+        total_segments = len(raw_segments)
         current = {
             "start": raw_segments[0]["start"],
             "end": raw_segments[0]["end"],
@@ -169,7 +174,7 @@ class AudioService:
             "spk": raw_segments[0].get("spk", "unknown"),
             "count": 1  # 添加计数器
         }
-        for seg in raw_segments[1:]:
+        for i, seg in enumerate(raw_segments[1:]):
             current_duration = (current["end"] - current["start"]) / 1000  # 计算当前片段时长（转为秒）
             # 合并条件：相同说话人 + 间隔 <0.5秒 + 当前片段时长未达到最小要求
             can_merge = (
@@ -192,6 +197,9 @@ class AudioService:
                         "text": current["text"],
                         "spk": current["spk"]
                     })
+                    # 更新进度条
+                    progress = int(((i + 1) / total_segments) * 100)
+                    progress_callback(task_id, progress, f"已合并 {i + 1} 个片段")
                     # 重置current为当前seg
                     current = {
                         "start": seg["start"],
@@ -208,6 +216,7 @@ class AudioService:
         # 处理最后一个片段
         # 检查最后一个片段时长是否满足最小要求
         if (current["end"] - current["start"]) / 1000 >= min_chunk_duration:
+            progress_callback(task_id, 100, "片段合并完成")
             merged.append({
                 "start": current["start"],
                 "end": current["end"],
@@ -223,11 +232,12 @@ class AudioService:
                 "text": current["text"],
                 "spk": current["spk"]
             })
+            progress_callback(task_id, 100, "片段合并完成（最后一个片段未达最小时长）")
         return merged
+
     def _save_merged_segment(self, original_path: str, start: float, end: float,
                              index: int, task_id: str) -> str:
         """保存合并后的长片段（修复变量引用问题）"""
-        output_path = None  # 提前初始化变量
         try:
             # 1. 校验输入参数
             if not os.path.exists(original_path):
@@ -239,8 +249,8 @@ class AudioService:
             duration_ms = len(audio)  # 音频总时长（毫秒）
 
             # 3. 校验时间范围有效性
-            start_ms = int(start )
-            end_ms = int(end )
+            start_ms = int(start)
+            end_ms = int(end)
             if start_ms < 0 or end_ms > duration_ms:
                 raise ValueError(
                     f"时间范围超出音频边界: 0-{duration_ms / 1000:.2f}s "
@@ -254,8 +264,8 @@ class AudioService:
             output_dir = os.path.join(os.path.dirname(original_path), "merged_segments")
             os.makedirs(output_dir, exist_ok=True)
 
-            filename = f"merged_{task_id}_{index:03d}.mp3"
-            output_path = os.path.join(output_dir, filename)  # 明确赋值位置
+            filename = f"merged_{task_id}_{index:05d}.mp3"
+            output_path = os.path.join(output_dir, filename)
 
             # 6. 导出音频文件
             segment.export(
@@ -286,22 +296,34 @@ class AudioService:
             )
             raise RuntimeError(f"合并片段保存失败: {error_context} → {str(e)}") from e
 
-    def split_segments(self, merged_segments, file_path, task_id):
+    def split_segments(self, merged_segments, file_path, task_id, progress_callback):
         segments_paths = []
-        for idx, merged_seg in enumerate(merged_segments):
-            try:
-                segment_path = self._save_merged_segment(
+        total_segments = len(merged_segments)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # 创建任务列表
+            futures = []
+            for idx, merged_seg in enumerate(merged_segments):
+                future = executor.submit(
+                    self._save_merged_segment,
                     original_path=file_path,
                     start=merged_seg["start"],
                     end=merged_seg["end"],
                     index=idx,
                     task_id=task_id
                 )
-                # 生成URL
-                segment_url = f"{segment_path}"
-                segments_paths.append((idx, segment_url, merged_seg))
-            except Exception as e:
-                print(f"保存片段 {idx} 失败: {str(e)}")
+                futures.append(future)
+
+            # 使用 map 方法保持结果顺序
+            for i, (future, merged_seg) in enumerate(zip(futures, merged_segments)):
+                try:
+                    segment_path = future.result()
+                    segment_url = f"{segment_path}"
+                    segments_paths.append((idx, segment_url, merged_seg))
+                    if i % 100 == 0:
+                        progress = int(((i + 1) / total_segments) * 100)
+                        progress_callback(task_id, progress, f"已保存 {i + 1} 个片段")
+                except Exception as e:
+                    print(f"保存片段 {idx} 失败: {str(e)}")
         return segments_paths
 
     def upload_segments(self, segments_paths, task_id):
@@ -342,7 +364,6 @@ class AudioService:
         # 按开始时间排序
         formatted_results.sort(key=lambda x: x.get("start", 0))
         return formatted_results
-
 
 
 audio_service = AudioService()
