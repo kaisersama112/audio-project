@@ -299,7 +299,7 @@ class AudioService:
     def split_segments(self, merged_segments, file_path, task_id, progress_callback):
         segments_paths = []
         total_segments = len(merged_segments)
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:  # 固定使用5个线程
             # 创建任务列表
             futures = []
             for idx, merged_seg in enumerate(merged_segments):
