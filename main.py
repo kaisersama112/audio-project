@@ -1,7 +1,4 @@
 import os
-import time
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 from starlette.staticfiles import StaticFiles
 
@@ -10,8 +7,6 @@ from routers import transcribe
 
 from services.audio_service import audio_service
 from utils.mysql_db import init_db
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 app = FastAPI()
 app.include_router(transcribe.router, prefix="/api/v1", tags=["transcribe"])
 

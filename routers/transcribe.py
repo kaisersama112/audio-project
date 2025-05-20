@@ -198,7 +198,7 @@ def merge_with_ffmpeg(task_dir: str, output_path: str):
 
     # 使用FFmpeg合并
     cmd = [
-        "ffmpeg",
+        "ffmpeg", "-y",
         "-f", "concat",
         "-safe", "0",
         "-i", concat_list,

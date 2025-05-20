@@ -59,7 +59,7 @@ RUN apt-get update -qq && \
 
 # 从构建阶段复制 CUDA 库和 Python 依赖
 COPY --from=builder /usr/local/cuda /usr/local/cuda
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libcudnn* /usr/lib/x86_64-linux-gnu/
+#COPY --from=builder /usr/lib/x86_64-linux-gnu/libcudnn* /usr/lib/x86_64-linux-gnu/
 COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
 COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn
 
@@ -76,4 +76,4 @@ ENV OMP_NUM_THREADS=1 \
     TF_ENABLE_ONEDNN_OPTS=0
 
 EXPOSE 7005
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7005", "--workers", "1"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7005", "--workers", "3"]
