@@ -502,13 +502,8 @@ async def download_bulk_segments(task_id: str, indices: str = Query(..., descrip
     # 从 segments 中筛选出 index 匹配的项
     matched_segments = []
     for seg in segments:
-        if seg.get("index") in target_indices:
+        if int(seg.get("index")) in target_indices:
             matched_segments.append(seg)
-
-    if len(matched_segments) != len(target_indices):
-        # 可选：如果希望严格报错缺失的 index，可启用下面这行
-        # raise HTTPException(400, f"部分索引未找到，请确认是否有效：{target_indices}")
-        pass  # 或者只下载存在的部分
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
         for segment in matched_segments:
@@ -539,6 +534,7 @@ async def download_bulk_segments(task_id: str, indices: str = Query(..., descrip
             "Content-Length": content_length
         }
     )
+
 
 @router.get("/download/all/{task_id}", responses={
     200: {"content": {"application/zip": {}}, "description": "返回全部音频"}},

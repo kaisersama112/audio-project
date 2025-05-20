@@ -318,7 +318,7 @@ class AudioService:
                 try:
                     segment_path = future.result()
                     segment_url = f"{segment_path}"
-                    segments_paths.append((idx, segment_url, merged_seg))
+                    segments_paths.append((i, segment_url, merged_seg))
                     if i % 100 == 0:
                         progress = int(((i + 1) / total_segments) * 100)
                         progress_callback(task_id, progress, f"已保存 {i + 1} 个片段")
