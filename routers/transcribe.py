@@ -29,7 +29,8 @@ import concurrent.futures
 from models.schemas import TranscribeResponse, Segment, TaskStatusResponse, PaginatedSegments, ChunkUploadResponse
 from services.audio_service import audio_service
 from utils.file_utils import cleanup_task
-from utils.mysql_db import get_db_connection, get_task, create_task, get_task_results, update_task_status
+from utils.mysql_db import get_db_connection, get_task, create_task, get_task_results, update_task_status, \
+    get_all_task_results
 import threading
 
 TEMP_DIR = "temp_audio_files"
@@ -487,28 +488,32 @@ async def download_single_segment(task_id: str, segment_index: int):
 @router.get("/download/bulk/{task_id}", responses={
     200: {"content": {"application/zip": {}}, "description": "返回ZIP压缩包"}},
             summary="多音频下载")
-async def download_bulk_segments(task_id: str, indices: str = Query(..., description="逗号分隔的片段索引列表")):
+async def download_bulk_segments(task_id: str, indices: str = Query(..., description="逗号分隔的原始索引列表")):
     with get_db_connection() as conn:
-        segments = get_task_results(conn, task_id)["items"]
+        segments = get_all_task_results(conn, task_id)
         if not segments:
             raise HTTPException(404, "任务结果不存在")
 
     try:
-        indices_list = [int(idx) for idx in indices.split(',') if idx.strip()]
+        target_indices = [int(idx) for idx in indices.split(',') if idx.strip()]
     except ValueError:
         raise HTTPException(400, "索引格式错误，请使用逗号分隔的整数")
 
-    if not all(0 <= idx < len(segments) for idx in indices_list):
-        raise HTTPException(400, f"索引范围错误，有效范围：0-{len(segments) - 1}")
+    # 从 segments 中筛选出 index 匹配的项
+    matched_segments = []
+    for seg in segments:
+        if seg.get("index") in target_indices:
+            matched_segments.append(seg)
 
+    if len(matched_segments) != len(target_indices):
+        # 可选：如果希望严格报错缺失的 index，可启用下面这行
+        # raise HTTPException(400, f"部分索引未找到，请确认是否有效：{target_indices}")
+        pass  # 或者只下载存在的部分
     zip_buffer = BytesIO()
-
     with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
-        # 强制使用 UTF-8 编码写入文件名
-        for idx in indices_list:
-            segment = segments[idx]
+        for segment in matched_segments:
             audio_url = segment.get("url")
-            speaker = segment.get("speaker", "unknown")  # 获取说话人信息
+            speaker = segment.get("speaker", "unknown")
             if not audio_url:
                 continue
 
@@ -519,35 +524,61 @@ async def download_bulk_segments(task_id: str, indices: str = Query(..., descrip
                 content = response.content
                 filename_base = f"{segment['text'][:50]}_{segment['start']:.2f}-{segment['end']:.2f}.mp3"
                 safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename_base)
-                folder_name = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', speaker)  # 创建安全的文件夹名
+                folder_name = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', speaker)
                 final_path = f"{folder_name}/{safe_filename}"
                 zip_file.writestr(final_path, content)
 
     zip_buffer.seek(0)
+    content_length = str(zip_buffer.getbuffer().nbytes)
+
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="{task_id}_segments_bulk_{datetime.now().strftime("%Y%m%d%H%M%S")}.zip"',
-            "Content-Length": str(zip_buffer.tell())
+            "Content-Length": content_length
         }
     )
-
 
 @router.get("/download/all/{task_id}", responses={
     200: {"content": {"application/zip": {}}, "description": "返回全部音频"}},
             summary="全部音频下载")
 async def download_all_segments(task_id: str):
     with get_db_connection() as conn:
-        segments = get_task_results(conn, task_id)["items"]
+        segments = get_all_task_results(conn, task_id)
         if not segments:
             raise HTTPException(404, "任务结果不存在")
 
-    indices = ",".join(str(i) for i in range(len(segments)))
+    zip_buffer = BytesIO()
 
-    return await download_bulk_segments(
-        task_id=task_id,
-        indices=indices
+    with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for segment in segments:
+            audio_url = segment.get("url")
+            speaker = segment.get("speaker", "unknown")
+            if not audio_url:
+                continue
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(audio_url)
+                if response.status_code != 200:
+                    continue
+                content = response.content
+                filename_base = f"{segment['text'][:50]}_{segment['start']:.2f}-{segment['end']:.2f}.mp3"
+                safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename_base)
+                folder_name = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', speaker)
+                final_path = f"{folder_name}/{safe_filename}"
+                zip_file.writestr(final_path, content)
+
+    zip_buffer.seek(0)
+    content_length = str(zip_buffer.getbuffer().nbytes)
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{task_id}_all_segments_{datetime.now().strftime("%Y%m%d%H%M%S")}.zip"',
+            "Content-Length": content_length
+        }
     )
 
 

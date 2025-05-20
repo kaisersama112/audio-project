@@ -199,3 +199,13 @@ def get_task_results(conn, task_id, keyword=None, speaker=None, page=1, per_page
             "per_page": per_page,
             "total_pages": total_pages
         }
+
+
+def get_all_task_results(conn, task_id): # 获取所有任务结果
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT * FROM ai_task_results WHERE task_id = %s",
+            (task_id,)
+        )
+        results = cursor.fetchall()
+    return results
