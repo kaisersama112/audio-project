@@ -5,17 +5,11 @@
 @Author  ：panshangguo
 @Date    ：14/5/2025 下午4:24 
 """
-import asyncio
-import os
-import re
-import shutil
 
 import pymysql
 from pymysql.cursors import DictCursor
 from contextlib import contextmanager
 from datetime import datetime
-
-from services.audio_service import audio_service
 
 # 测试站
 """
