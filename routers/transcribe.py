@@ -7,265 +7,32 @@
 """
 import glob
 import asyncio
-import io
-import subprocess
 from datetime import datetime
-from typing import Optional, List
-
+from typing import Optional
 import httpx
 from fastapi import APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Query, Form
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
-from pydub import AudioSegment
 from io import BytesIO
 import os
-import uuid
 import shutil
 import json
 import re
 import zipfile
-from urllib.parse import quote
-import concurrent.futures
+
+from starlette.responses import FileResponse
+
+from config import TEMP_DIR
 from models.schemas import TranscribeResponse, Segment, TaskStatusResponse, PaginatedSegments, ChunkUploadResponse
-from services.audio_service import audio_service
+from services.audio_service import audio_service, format_task_merged_filename, extract_index_from_filename, \
+    load_segments_if_completed, convert_to_wav, merge_with_ffmpeg, validate_audio_file, process_audio_task
 from utils.file_utils import cleanup_task
 from utils.mysql_db import get_db_connection, get_task, create_task, get_task_results, update_task_status, \
     get_all_task_results
-import threading
-
-TEMP_DIR = "temp_audio_files"
 
 router = APIRouter(tags=["音频切块"])
 
 
-def convert_to_wav(input_path: str, output_path: str):
-    try:
-        audio = AudioSegment.from_file(input_path)
-        audio.export(output_path, format="wav")
-    except Exception as e:
-        raise RuntimeError(f"格式转换失败: {str(e)}")
-
-
-def split_progress_callback(task_id, progress, message):
-    update_task_status({
-        "task_id": task_id,
-        "status": "processing",
-        "message": f"保存片段: {message}",
-        "progress": 60 + int(progress * 0.3)  # 假设保存占总进度的30%
-    })
-
-
-def merge_progress_callback(task_id, progress, message):
-    update_task_status({
-        "task_id": task_id,
-        "status": "processing",
-        "message": f"合并片段: {message}",
-        "progress": 30 + int(progress * 0.3)
-    })
-
-
-async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float):
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    try:
-        update_task_status({
-            "task_id": task_id,
-            "status": "processing",
-            "message": "开始处理音频文件",
-            "progress": 0
-        })
-
-        if original_ext.lower() != '.wav':
-            update_task_status({
-                "task_id": task_id,
-                "status": "processing",
-                "message": "正在转换音频格式",
-                "progress": 10
-            })
-            wav_path = os.path.join(task_dir, "audio.wav")
-            await asyncio.to_thread(convert_to_wav, original_path, wav_path)
-            processing_path = wav_path
-        else:
-            processing_path = original_path
-            update_task_status({
-                "task_id": task_id,
-                "status": "processing",
-                "message": "音频格式无需转换",
-                "progress": 10
-            })
-
-        # 文本识别
-        update_task_status({
-            "task_id": task_id,
-            "status": "processing",
-            "message": "开始语音识别",
-            "progress": 20
-        })
-        result = await asyncio.to_thread(audio_service.transcribe_para_former, processing_path)
-        # 发音人合并
-        update_task_status({
-            "task_id": task_id,
-            "status": "processing",
-            "message": "合并发音人信息",
-            "progress": 30
-        })
-        raw_segments = result[0]["sentence_info"]
-        merged_segments = await asyncio.to_thread(
-            audio_service.merge_segments,
-            task_id,
-            raw_segments,
-            min_chunk_duration,
-            merge_progress_callback
-        )
-
-        # 格式化结果
-        update_task_status({
-            "task_id": task_id,
-            "status": "processing",
-            "message": "格式化识别结果",
-            "progress": 60
-        })
-        # 保存所有分片到本地
-        segments_paths = await asyncio.to_thread(
-            audio_service.split_segments,
-            merged_segments,
-            processing_path,
-            task_id,
-            split_progress_callback
-        )
-        # 上传分片到OSS
-        """
-        segments = await asyncio.to_thread(audio_service.upload_segments, segments_paths, task_id)
-        """
-        update_task_status({
-            "task_id": task_id,
-            "status": "processing",
-            "message": "保存识别结果到数据库",
-            "progress": 90
-        })
-        # 结果保存阶段
-        update_task_status({
-            "task_id": task_id,
-            "status": "processing",
-            "message": "保存识别结果",
-            "progress": 95
-        })
-        from config import base_url
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                for idx, segment_path, merged_seg in segments_paths:
-                    cursor.execute('''
-                        INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker,`url`)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ''', (
-                        task_id,
-                        idx,
-                        merged_seg.get("start"),
-                        merged_seg.get("end"),
-                        merged_seg.get("text"),
-                        str(merged_seg.get("spk")),
-                        base_url + segment_path.replace("\\", "/")
-                    ))
-                conn.commit()
-
-        update_task_status({
-            "task_id": task_id,
-            "status": "completed",
-            "message": "处理完成",
-            "progress": 100
-        })
-        # 将结果保存到数据库
-
-        # with get_db_connection() as conn:
-        #     with conn.cursor() as cursor:
-        #         for segment in segments:
-        #             cursor.execute('''
-        #                 INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker,`url`)
-        #                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-        #             ''', (
-        #                 task_id,
-        #                 segment.get("index"),
-        #                 segment.get("start"),
-        #                 segment.get("end"),
-        #                 segment.get("text"),
-        #                 segment.get("speaker"),
-        #                 segment.get("url")
-        #             ))
-        #         conn.commit()
-        #
-        # update_task_status({
-        #     "task_id": task_id,
-        #     "status": "completed",
-        #     "message": "处理完成",
-        #     "progress": 100
-        # })
-
-    except Exception as e:
-        update_task_status({
-            "task_id": task_id,
-            "status": "failed",
-            "message": "处理过程中发生错误",
-            "progress": 100,
-            "error": str(e)
-        })
-
-
-def merge_with_ffmpeg(task_dir: str, output_path: str):
-    """使用FFmpeg合并分片文件"""
-    # 生成分片列表文件
-
-    concat_list = os.path.join(task_dir, "concat_list.txt")
-    if os.path.exists(concat_list):
-        os.remove(concat_list)
-        os.remove(os.path.join(task_dir, "merged.wav"))
-    with open(concat_list, "w") as f:
-        # 修改为查找 .wav 文件
-        for chunk in sorted(glob.glob(os.path.join(task_dir, "chunk_*.wav"))):
-            # 写入相对路径
-            f.write(f"file '{os.path.basename(chunk)}'\n")
-
-    # 使用FFmpeg合并
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", concat_list,
-        "-c", "copy",
-        "-map_metadata", "0",
-        output_path
-    ]
-
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
-        error_msg = f"FFmpeg合并失败: {e.stderr.decode()}"
-        raise RuntimeError(error_msg)
-    finally:
-        os.remove(concat_list)
-
-
-def validate_audio_file(file_path: str):
-    """使用FFprobe验证文件有效性"""
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        file_path
-    ]
-
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True)
-        duration = float(result.stdout.decode().strip())
-        if duration <= 0:
-            raise ValueError("无效的音频时长")
-        return True
-    except subprocess.CalledProcessError as e:
-        error_msg = f"文件验证失败: {e.stderr.decode()}"
-        raise RuntimeError(error_msg)
-
-
-# 分片上传接口
-@router.post("/upload_chunk", response_model=ChunkUploadResponse)
+@router.post("/upload_chunk", response_model=ChunkUploadResponse, summary="上传文件分片")
 async def upload_chunk(
         file: UploadFile = File(...),
         chunk_number: int = Form(...),
@@ -274,18 +41,13 @@ async def upload_chunk(
         task_id: Optional[str] = Form(None),
 ):
     """上传文件分片，支持覆盖现有任务"""
-    # 生成或验证任务ID
     if not task_id:
         raise HTTPException(400, "任务ID不能为空")
 
     task_dir = os.path.join(TEMP_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
-
-    # 验证分片序号有效性
     if chunk_number < 0 or total_chunks <= 0 or chunk_number >= total_chunks:
         raise HTTPException(400, "分片参数不合法")
-
-    # 保存元数据（第一个分片时）
     if chunk_number == 0:
         metadata = {
             "file_name": file_name,
@@ -294,27 +56,17 @@ async def upload_chunk(
         }
         with open(os.path.join(task_dir, "metadata.json"), "w") as f:
             json.dump(metadata, f)
-
-    # 保存并转换分片文件为.wav
     chunk_path = os.path.join(task_dir, f"chunk_{chunk_number:08d}.part")
     wav_chunk_path = os.path.join(task_dir, f"chunk_{chunk_number:08d}.wav")
     try:
-        # 流式写入（每次1MB）
         with open(chunk_path, "wb") as f:
-            while content := await file.read(1024 * 1024):
+            while content := await file.read(1024 * 1024 * 5):
                 f.write(content)
-
-        # 转换为.wav
         await asyncio.to_thread(convert_to_wav, chunk_path, wav_chunk_path)
-
-        # 删除原始.part文件
         os.remove(chunk_path)
-
     except Exception as e:
         shutil.rmtree(task_dir, ignore_errors=True)
         raise HTTPException(500, f"分片保存或转换失败: {str(e)}")
-
-    # 更新已上传分片计数
     uploaded = len([f for f in os.listdir(task_dir) if f.startswith("chunk_") and f.endswith(".wav")])
     return {
         "task_id": task_id,
@@ -325,8 +77,7 @@ async def upload_chunk(
     }
 
 
-# 合并分片接口
-@router.post("/merge_chunks", response_model=TranscribeResponse)
+@router.post("/merge_chunks", response_model=TranscribeResponse, summary="合并分片并开始处理")
 async def merge_chunks(
         task_id: str = Form(...),
         min_chunk_duration: float = Form(3.0),  # 最小分片时长，单位秒
@@ -378,16 +129,6 @@ async def merge_chunks(
         raise HTTPException(500, f"文件处理失败: {str(e)}")
 
 
-def load_segments_if_completed(conn, task_id):
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM ai_task_results WHERE task_id = %s ORDER BY `index`", (task_id,))
-            results = cursor.fetchall()
-        return [Segment(**val) for val in results]
-    except Exception as e:
-        return f"Error loading segments: {str(e)}"
-
-
 @router.get("/tasks/{task_id}/status", response_model=TaskStatusResponse, summary="获取任务状态")
 async def get_task_status(task_id: str):
     with get_db_connection() as conn:
@@ -405,7 +146,8 @@ async def get_task_status(task_id: str):
             complete_time=str(task['complete_time']),
             duration=task['duration'],
             error=task['error'],
-            data=segments
+            is_upload=task['is_upload'],
+            data=segments,
         )
 
 
@@ -454,128 +196,290 @@ async def get_task_segments(
     200: {"content": {"audio/mpeg": {}}, "description": "返回MP3音频片段"}},
             summary="单音频下载")
 async def download_single_segment(task_id: str, segment_index: int):
-    with get_db_connection() as conn:
-        task = get_task(conn, task_id)
+    with get_db_connection() as conn_task:
+        task = get_task(conn_task, task_id)
         if not task:
             raise HTTPException(404, "任务不存在")
-        segments = get_task_results(conn, task_id)
-        if segment_index < 0 or segment_index >= len(segments["items"]):
-            raise HTTPException(400, "无效的片段索引")
-        segment = segments["items"][segment_index]
-        audio_url = segment.get("url")
-        if not audio_url:
-            raise HTTPException(404, "音频URL不存在")
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(audio_url)
-            if response.status_code != 200:
-                raise HTTPException(500, f"无法下载音频片段: {response.status_code}")
-            audio_content = response.content
-        buffer = BytesIO(audio_content)
-    except Exception as e:
-        raise HTTPException(500, f"音频加载失败: {str(e)}")
-    safe_filename = quote(segment["text"][:50] + f"_{segment['start']:.2f}-{segment['end']:.2f}.mp3", safe='')
-    return StreamingResponse(
-        buffer,
-        media_type="audio/mpeg",
-        headers={
-            "Content-Disposition": f'attachment; filename="{safe_filename}"',
-        }
-    )
+    if task['is_upload']:
+        # 上传文件下载逻辑
+        with get_db_connection() as conn_status:
+            segments = get_task_results(conn_status, task_id)
+            if segment_index < 0 or segment_index >= len(segments["items"]): raise HTTPException(400, "无效的片段索引")
+            segment = segments["items"][segment_index]
+            audio_url = segment.get("url")
+            if not audio_url: raise HTTPException(404, "音频URL不存在")
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(audio_url)
+                    if response.status_code != 200:
+                        raise HTTPException(500, f"无法下载音频片段: {response.status_code}")
+                    audio_content = response.content
+                buffer = BytesIO(audio_content)
+            except Exception as e:
+                raise HTTPException(500, f"音频加载失败: {str(e)}")
+            filename_base = f"{segment['text'][:50]}_{segment['start']:.2f}-{segment['end']:.2f}.mp3"
+            safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename_base)
+            return StreamingResponse(
+                buffer,
+                media_type="audio/mpeg",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{safe_filename}"',
+                }
+            )
+    else:
+        # 本地文件下载逻辑
+        base_dir = os.path.join("temp_audio_files", task_id)
+        segments_dir = os.path.join(base_dir, "merged_segments")
+        if not os.path.exists(segments_dir):
+            raise HTTPException(404, "音频文件夹不存在")
+        filename = format_task_merged_filename(task_id, segment_index)
+        file_path = os.path.join(segments_dir, filename)
+        if not os.path.exists(file_path):
+            raise HTTPException(404, "音频文件不存在")
+        # 从数据库获取当前片段的文本、开始时间和结束时间信息
+        with get_db_connection() as conn_status:
+            cursor = conn_status.cursor()
+            cursor.execute(
+                "SELECT text, `start`, end FROM ai_task_results WHERE task_id = %s AND `index` = %s",
+                (task_id, segment_index)
+            )
+            result = cursor.fetchone()
+            if not result:
+                raise HTTPException(404, "片段信息不存在")
+            text = result.get("text", "")
+            start = result.get("start", 0.0)
+            end = result.get("end", 0.0)
+        # filename_base = f"{text[:50]}_{start:.2f}-{end:.2f}.mp3"
+        filename_base = f"{text[:50]}.mp3"
+        safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename_base)
+        return FileResponse(
+            file_path,
+            media_type="audio/mpeg",
+            filename=safe_filename,
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_filename}"'
+            }
+        )
 
 
 @router.get("/download/bulk/{task_id}", responses={
     200: {"content": {"application/zip": {}}, "description": "返回ZIP压缩包"}},
             summary="多音频下载")
 async def download_bulk_segments(task_id: str, indices: str = Query(..., description="逗号分隔的原始索引列表")):
-    with get_db_connection() as conn:
-        segments = get_all_task_results(conn, task_id)
-        if not segments:
-            raise HTTPException(404, "任务结果不存在")
+    with get_db_connection() as conn_task:
+        task = get_task(conn_task, task_id)
+        if not task:
+            raise HTTPException(404, "任务不存在")
+    if task['is_upload']:
+        # 上传文件下载逻辑
+        with get_db_connection() as conn_status:
+            segments = get_all_task_results(conn_status, task_id)
+            if not segments:
+                raise HTTPException(404, "任务结果不存在")
 
-    try:
-        target_indices = [int(idx) for idx in indices.split(',') if idx.strip()]
-    except ValueError:
-        raise HTTPException(400, "索引格式错误，请使用逗号分隔的整数")
-
-    # 从 segments 中筛选出 index 匹配的项
-    matched_segments = []
-    for seg in segments:
-        if int(seg.get("index")) in target_indices:
-            matched_segments.append(seg)
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
-        for segment in matched_segments:
-            audio_url = segment.get("url")
-            speaker = segment.get("speaker", "unknown")
-            if not audio_url:
-                continue
-
-            async with httpx.AsyncClient() as client:
-                response = await client.get(audio_url)
-                if response.status_code != 200:
+        try:
+            target_indices = [int(idx) for idx in indices.split(',') if idx.strip()]
+        except ValueError:
+            raise HTTPException(400, "索引格式错误，请使用逗号分隔的整数")
+        # 从 segments 中筛选出 index 匹配的项
+        matched_segments = []
+        for seg in segments:
+            if int(seg.get("index")) in target_indices:
+                matched_segments.append(seg)
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+            # 创建外层文件夹
+            outer_folder = f"{task_id}_segments_bulk_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            for segment in matched_segments:
+                audio_url = segment.get("url")
+                speaker = segment.get("speaker", "unknown")
+                if not audio_url:
                     continue
-                content = response.content
-                filename_base = f"{segment['text'][:50]}_{segment['start']:.2f}-{segment['end']:.2f}.mp3"
-                safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename_base)
-                folder_name = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', speaker)
-                final_path = f"{folder_name}/{safe_filename}"
-                zip_file.writestr(final_path, content)
 
-    zip_buffer.seek(0)
-    content_length = str(zip_buffer.getbuffer().nbytes)
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(audio_url)
+                    if response.status_code != 200:
+                        continue
+                    content = response.content
+                    filename_base = f"{segment['text'][:50]}_{segment['start']:.2f}-{segment['end']:.2f}.mp3"
+                    safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename_base)
+                    folder_name = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', speaker)
+                    final_path = f"{outer_folder}/{folder_name}/{safe_filename}"
+                    zip_file.writestr(final_path, content)
 
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="{task_id}_segments_bulk_{datetime.now().strftime("%Y%m%d%H%M%S")}.zip"',
-            "Content-Length": content_length
-        }
-    )
+        zip_buffer.seek(0)
+        content_length = str(zip_buffer.getbuffer().nbytes)
+
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{outer_folder}.zip"',
+                "Content-Length": content_length
+            }
+        )
+    else:
+        # 本地文件下载逻辑
+        base_dir = os.path.join("temp_audio_files", task_id)
+        segments_dir = os.path.join(base_dir, "merged_segments")
+        if not os.path.exists(segments_dir):
+            raise HTTPException(404, "音频文件夹不存在")
+        try:
+            target_indices = [int(idx) for idx in indices.split(',') if idx.strip()]
+        except ValueError:
+            raise HTTPException(400, "索引格式错误，请使用逗号分隔的整数")
+        zip_buffer = BytesIO()
+        with get_db_connection() as conn_task:
+            with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+                # 创建外层文件夹
+                outer_folder = f"{task_id}_segments_bulk_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                for index in target_indices:
+                    filename = format_task_merged_filename(task_id, index)
+                    file_path = os.path.join(segments_dir, filename)
+                    if os.path.exists(file_path):
+                        # 从数据库获取当前片段的文本、开始时间、结束时间和发音人信息
+                        cursor = conn_task.cursor()
+                        cursor.execute(
+                            "SELECT text, `start`, `end`, speaker FROM ai_task_results WHERE task_id = %s AND `index` = %s",
+                            (task_id, index)
+                        )
+                        result = cursor.fetchone()
+                        if not result:
+                            raise HTTPException(404, "片段信息不存在")
+                        text = result.get("text", "")
+                        start = result.get("start", 0.0)
+                        end = result.get("end", 0.0)
+                        speaker = result.get("speaker", "unknown")
+                        # filename_base = f"{text[:50]}_{start:.2f}-{end:.2f}.mp3"
+                        filename_base = f"{text[:50]}.mp3"
+                        safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename_base)
+                        folder_name = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', speaker)
+                        final_path = f"{outer_folder}/{folder_name}/{safe_filename}"
+                        zip_file.writestr(final_path, open(file_path, 'rb').read())
+                    else:
+                        raise HTTPException(400, f"索引 {index} 对应的文件不存在")
+        zip_buffer.seek(0)
+        content_length = str(zip_buffer.getbuffer().nbytes)
+
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{outer_folder}.zip"',
+                "Content-Length": content_length
+            }
+        )
 
 
 @router.get("/download/all/{task_id}", responses={
     200: {"content": {"application/zip": {}}, "description": "返回全部音频"}},
             summary="全部音频下载")
 async def download_all_segments(task_id: str):
-    with get_db_connection() as conn:
-        segments = get_all_task_results(conn, task_id)
-        if not segments:
-            raise HTTPException(404, "任务结果不存在")
+    with get_db_connection() as conn_task:
+        task = get_task(conn_task, task_id)
+        if not task:
+            raise HTTPException(404, "任务不存在")
+    if task['is_upload']:
+        # 上传文件下载逻辑
+        with get_db_connection() as conn_status:
+            segments = get_all_task_results(conn_status, task_id)
+            if not segments:
+                raise HTTPException(404, "任务结果不存在")
 
-    zip_buffer = BytesIO()
-
-    with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
-        for segment in segments:
-            audio_url = segment.get("url")
-            speaker = segment.get("speaker", "unknown")
-            if not audio_url:
-                continue
-
-            async with httpx.AsyncClient() as client:
-                response = await client.get(audio_url)
-                if response.status_code != 200:
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+            # 创建外层文件夹
+            outer_folder = f"{task_id}_all_segments_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            for segment in segments:
+                audio_url = segment.get("url")
+                speaker = segment.get("speaker", "unknown")
+                if not audio_url:
                     continue
-                content = response.content
-                filename_base = f"{segment['text'][:50]}_{segment['start']:.2f}-{segment['end']:.2f}.mp3"
-                safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename_base)
-                folder_name = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', speaker)
-                final_path = f"{folder_name}/{safe_filename}"
-                zip_file.writestr(final_path, content)
 
-    zip_buffer.seek(0)
-    content_length = str(zip_buffer.getbuffer().nbytes)
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(audio_url)
+                    if response.status_code != 200:
+                        continue
+                    content = response.content
+                    filename_base = f"{segment['text'][:50]}_{segment['start']:.2f}-{segment['end']:.2f}.mp3"
+                    safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename_base)
+                    folder_name = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', speaker)
+                    final_path = f"{outer_folder}/{folder_name}/{safe_filename}"
+                    zip_file.writestr(final_path, content)
+        zip_buffer.seek(0)
+        content_length = str(zip_buffer.getbuffer().nbytes)
 
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="{task_id}_all_segments_{datetime.now().strftime("%Y%m%d%H%M%S")}.zip"',
-            "Content-Length": content_length
-        }
-    )
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{outer_folder}.zip"',
+                "Content-Length": content_length
+            }
+        )
+    else:
+        # 本地文件下载逻辑
+        base_dir = os.path.join("temp_audio_files", task_id)
+        segments_dir = os.path.join(base_dir, "merged_segments")
+        if not os.path.exists(segments_dir):
+            raise HTTPException(404, "音频文件夹不存在")
+
+        zip_buffer = BytesIO()
+        with get_db_connection() as conn_status:
+            with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+                # 从数据库获取所有片段的信息
+                cursor = conn_status.cursor()
+                cursor.execute(
+                    "SELECT `index`, text, `start`, `end`, speaker FROM ai_task_results WHERE task_id = %s",
+                    (task_id,)
+                )
+                segments = cursor.fetchall()
+                if not segments:
+                    raise HTTPException(404, "任务结果不存在")
+
+                # 创建外层文件夹
+                outer_folder = f"{task_id}_all_segments_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                speaker_dict = {}
+                for segment in segments:
+                    speaker_dict[int(segment["index"])] = {
+                        "text": segment.get("text", ""),
+                        "start": segment.get("start", 0.0),
+                        "end": segment.get("end", 0.0),
+                        "speaker": segment.get("speaker", "unknown")
+                    }
+
+                for file_name in os.listdir(segments_dir):
+                    file_path = os.path.join(segments_dir, file_name)
+                    if os.path.isfile(file_path):
+                        # 从文件名中提取索引信息
+                        index = int(extract_index_from_filename(file_name))
+                        segment_info = speaker_dict.get(index, None)
+                        if segment_info:
+                            text = segment_info["text"]
+                            start = segment_info["start"]
+                            end = segment_info["end"]
+                            speaker = segment_info["speaker"]
+                            # filename_base = f"{text[:50]}_{start:.2f}-{end:.2f}.mp3"
+                            filename_base = f"{text[:50]}.mp3"
+                            safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename_base)
+                            folder_name = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', speaker)
+                            final_path = f"{outer_folder}/{folder_name}/{safe_filename}"
+                            zip_file.writestr(final_path, open(file_path, 'rb').read())
+                        else:
+                            final_path = f"{outer_folder}/{file_name}"
+                            zip_file.writestr(final_path, open(file_path, 'rb').read())
+
+        zip_buffer.seek(0)
+        content_length = str(zip_buffer.getbuffer().nbytes)
+
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{outer_folder}.zip"',
+                "Content-Length": content_length
+            }
+        )
 
 
 @router.delete("/segments/{task_id}", summary="批量删除指定分段")
@@ -589,7 +493,6 @@ async def delete_segments(
         segment_indices = [int(idx) for idx in indices.split(',') if idx.strip()]
     except ValueError:
         raise HTTPException(400, detail="索引格式错误，请使用逗号分隔的整数")
-
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:

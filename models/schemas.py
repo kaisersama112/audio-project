@@ -7,6 +7,8 @@
 """
 from pydantic import BaseModel, Field
 from typing import Optional, List
+
+
 class Segment(BaseModel):
     index: Optional[int] = None
     start: Optional[float] = None
@@ -15,18 +17,6 @@ class Segment(BaseModel):
     text: Optional[str] = None
     speaker: Optional[str] = None
     suffix: Optional[str] = None
-
-
-class TaskStatusResponse(BaseModel):
-    task_id: Optional[str]
-    status: Optional[str]
-    message: Optional[str]
-    progress: Optional[int]
-    start_time: Optional[str]
-    complete_time: Optional[str]
-    duration: Optional[float]
-    error: Optional[str]
-    data: Optional[list[dict]] = None
 
 
 class TranscribeResponse(BaseModel):
@@ -43,7 +33,12 @@ class TaskStatusResponse(BaseModel):
     complete_time: Optional[str]
     duration: Optional[float]
     error: Optional[str]
-    data: Optional[List[Segment]] = None  # 新增数据字段
+    is_upload: Optional[int] = 0
+    # 详细信息
+    data: Optional[List[Segment]] = None
+
+
+
 class PaginatedSegments(BaseModel):
     items: List[Segment]
     total: int
@@ -51,6 +46,8 @@ class PaginatedSegments(BaseModel):
     per_page: int
     total_pages: int
     search_hits: int = Field(..., description="包含关键字的记录总数")
+
+
 # 分片上传响应模型
 class ChunkUploadResponse(BaseModel):
     task_id: str

@@ -7,6 +7,7 @@
 """
 import asyncio
 import os
+import re
 import shutil
 
 import pymysql
@@ -15,6 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from services.audio_service import audio_service
+
 # 测试站
 """
 DB_CONFIG = {
@@ -65,6 +67,7 @@ def init_db():
                     start_time DATETIME,
                     complete_time DATETIME,
                     duration FLOAT,
+                    is_upload INT NOT NULL DEFAULT 0,
                     error TEXT,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -76,7 +79,7 @@ def init_db():
                               id INT AUTO_INCREMENT PRIMARY KEY,
                               task_id VARCHAR(36) NOT NULL,
                               `index` INT NOT NULL,
-                              start FLOAT NOT NULL,
+                              `start` FLOAT NOT NULL,
                               `end` FLOAT NOT NULL,
                               text TEXT NOT NULL,
                               speaker VARCHAR(100),
@@ -163,6 +166,15 @@ def get_task(conn, task_id):
     return result
 
 
+def get_speaker(conn, task_id, index):
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT speaker FROM ai_task_results WHERE task_id = %s AND `index` = %s",
+            (task_id, index)
+        )
+        result = cursor.fetchone()
+    return result['speaker'] if result else None
+
 def get_task_results(conn, task_id, keyword=None, speaker=None, page=1, per_page=10):
     with conn.cursor() as cursor:
         query = '''
@@ -201,7 +213,7 @@ def get_task_results(conn, task_id, keyword=None, speaker=None, page=1, per_page
         }
 
 
-def get_all_task_results(conn, task_id): # 获取所有任务结果
+def get_all_task_results(conn, task_id):  # 获取所有任务结果
     with conn.cursor() as cursor:
         cursor.execute(
             "SELECT * FROM ai_task_results WHERE task_id = %s",

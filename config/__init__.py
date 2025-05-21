@@ -43,5 +43,5 @@ hotword_list = [
     "价格"
 ]
 
-
+TEMP_DIR = "temp_audio_files"
 base_url="https://audio.cqhuancheng.cn/"

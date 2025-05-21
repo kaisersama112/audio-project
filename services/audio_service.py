@@ -6,22 +6,235 @@
 @Date    ：29/4/2025 下午4:51
 """
 import concurrent
+import glob
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
 
 from pydub import AudioSegment
 
-from config import hotword_list
+from config import hotword_list, TEMP_DIR
 
 from funasr import AutoModel
 import os
+import io
+import subprocess
 
+from models.schemas import Segment
 from services.oss_service import oss_service
+from utils.mysql_db import update_task_status, get_db_connection
+import asyncio
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 lock = threading.Lock()
+
+
+def convert_to_wav(input_path: str, output_path: str):
+    """
+    将音频文件转换为WAV格式
+    :param input_path: 输入文件路径
+    :param output_path: 输出文件路径
+    :return: None
+    """
+    try:
+        audio = AudioSegment.from_file(input_path)
+        audio.export(output_path, format="wav")
+    except Exception as e:
+        raise RuntimeError(f"格式转换失败: {str(e)}")
+
+
+def update_status(task_id, status: str, message: str, progress: int):
+    """
+    更新任务状态
+    :param task_id: 任务ID
+    :param status: 状态
+    :param message: 消息
+    :param progress: 进度
+    :return: None
+    """
+    update_task_status({
+        "task_id": task_id,
+        "status": status,
+        "message": message,
+        "progress": progress
+    })
+
+
+def split_progress_callback(task_id, progress, message):
+    """
+    分片进度回调函数
+    :param task_id: 任务ID
+    :param progress: 进度百分比
+    :param message: 进度消息
+    :return: None
+    """
+    update_status(task_id, "processing", f"保存片段: {message}", 60 + int(progress * 0.3))
+
+
+def merge_progress_callback(task_id, progress, message):
+    """
+    合并进度回调函数
+    :param task_id: 任务ID
+    :param progress: 进度百分比
+    :param message: 进度消息
+    :return: None
+    """
+    update_status(task_id, "processing", f"合并片段: {message}", 30 + int(progress * 0.3))
+
+
+async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float):
+    """
+    处理音频任务的异步函数
+    :param task_id: 任务ID
+    :param original_path: 原始音频文件路径
+    :param original_ext: 原始音频文件扩展名
+    :param min_chunk_duration: 最小分片时长
+    :return: None
+    """
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    try:
+        update_status(task_id, "processing", "开始处理音频文件", 0)
+        if original_ext.lower() != '.wav':
+            update_status(task_id, "processing", "正在转换音频格式", 10)
+            wav_path = os.path.join(task_dir, "audio.wav")
+            await asyncio.to_thread(convert_to_wav, original_path, wav_path)
+            processing_path = wav_path
+        else:
+            processing_path = original_path
+            update_status(task_id, "processing", "音频格式无需转换", 10)
+        update_status(task_id, "processing", "开始语音识别", 20)
+        result = await asyncio.to_thread(audio_service.transcribe_para_former, processing_path)
+        # 发音人合并
+        update_status(task_id, "processing", "合并发音人信息", 30)
+        raw_segments = result[0]["sentence_info"]
+        merged_segments = await asyncio.to_thread(
+            audio_service.merge_segments,
+            task_id,
+            raw_segments,
+            min_chunk_duration,
+            merge_progress_callback
+        )
+        update_status(task_id, "processing", "格式化识别结果", 60)
+        # 保存所有分片到本地
+        segments_paths = await asyncio.to_thread(
+            audio_service.split_segments,
+            merged_segments,
+            processing_path,
+            task_id,
+            split_progress_callback
+        )
+        """
+        segments = await asyncio.to_thread(audio_service.upload_segments, segments_paths, task_id)
+        """
+        # 结果保存阶段
+        update_status(task_id, "processing", "保存识别结果", 95)
+        from config import base_url
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                for idx, segment_path, merged_seg in segments_paths:
+                    cursor.execute('''
+                        INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker,`url`)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ''', (
+                        task_id,
+                        idx,
+                        merged_seg.get("start"),
+                        merged_seg.get("end"),
+                        merged_seg.get("text"),
+                        str(merged_seg.get("spk")),
+                        base_url + segment_path.replace("\\", "/")
+                    ))
+                conn.commit()
+        update_status(task_id, "completed", "处理完成", 100)
+    except Exception as e:
+        update_task_status({
+            "task_id": task_id,
+            "status": "failed",
+            "message": "处理过程中发生错误",
+            "progress": 100,
+            "error": str(e)
+        })
+
+
+def merge_with_ffmpeg(task_dir: str, output_path: str):
+    """使用FFmpeg合并分片文件"""
+    # 生成分片列表文件
+
+    concat_list = os.path.join(task_dir, "concat_list.txt")
+    if os.path.exists(concat_list):
+        os.remove(concat_list)
+        os.remove(os.path.join(task_dir, "merged.wav"))
+    with open(concat_list, "w") as f:
+        for chunk in sorted(glob.glob(os.path.join(task_dir, "chunk_*.wav"))):
+            f.write(f"file '{os.path.basename(chunk)}'\n")
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concat_list,
+        "-c", "copy",
+        "-map_metadata", "0",
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        error_msg = f"FFmpeg合并失败: {e.stderr.decode()}"
+        raise RuntimeError(error_msg)
+    finally:
+        os.remove(concat_list)
+
+
+def validate_audio_file(file_path: str):
+    """使用FFprobe验证文件有效性"""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path
+    ]
+
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True)
+        duration = float(result.stdout.decode().strip())
+        if duration <= 0:
+            raise ValueError("无效的音频时长")
+        return True
+    except subprocess.CalledProcessError as e:
+        error_msg = f"文件验证失败: {e.stderr.decode()}"
+        raise RuntimeError(error_msg)
+
+
+def load_segments_if_completed(conn, task_id):
+    """
+    检查任务是否已完成，如果完成则加载结果
+    """
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM ai_task_results WHERE task_id = %s ORDER BY `index`", (task_id,))
+            results = cursor.fetchall()
+        return [Segment(**val) for val in results]
+    except Exception as e:
+        return f"Error loading segments: {str(e)}"
+
+
+def format_task_merged_filename(task_id: str, index: int, suffix: str = "mp3"):
+    """格式化合并后的文件名"""
+    filename = f"merged_{task_id}_{index:05d}.{suffix}"
+    return filename
+
+
+def extract_index_from_filename(filename):
+    """
+    从文件名中提取索引
+    """
+    match = re.search(r'merged_.*?_(\d{5})\.mp3$', filename)
+    if match:
+        return int(match.group(1))
+    return None
 
 
 class AudioService:
@@ -58,32 +271,6 @@ class AudioService:
                 spk=True
             )
             return result
-
-    def _save_segment(self, original_path: str, seg: dict, index: int, task_id: str) -> str:
-        """保存音频片段到临时文件"""
-        audio = AudioSegment.from_file(original_path)
-        start_ms = int(seg["start"] * 1000)
-        end_ms = int(seg["end"] * 1000)
-        segment = audio[start_ms:end_ms]
-
-        # 创建存储目录
-        output_dir = os.path.join(os.path.dirname(original_path), "segments")
-        os.makedirs(output_dir, exist_ok=True)
-
-        # 生成文件名
-        filename = f"seg_{task_id}_{index:04d}.mp3"
-        output_path = os.path.join(output_dir, filename)
-
-        # 导出文件
-        segment.export(output_path,
-                       format="mp3",
-                       bitrate="192k",
-                       tags={
-                           'title': f"Segment {index}",
-                           'artist': 'Audio Processing System'
-                       })
-
-        return output_path
 
     def _upload_single_segment(self, segment_path: str, task_id: str, seg: dict, idx: int) -> Dict:
         """单个片段的上传任务"""
@@ -259,14 +446,12 @@ class AudioService:
 
             # 4. 切割音频片段
             segment = audio[start_ms:end_ms]
-
             # 5. 准备输出路径
             output_dir = os.path.join(os.path.dirname(original_path), "merged_segments")
             os.makedirs(output_dir, exist_ok=True)
-
-            filename = f"merged_{task_id}_{index:05d}.mp3"
+            # filename = f"merged_{task_id}_{index:05d}.mp3"
+            filename = format_task_merged_filename(task_id, index)
             output_path = os.path.join(output_dir, filename)
-
             # 6. 导出音频文件
             segment.export(
                 output_path,
