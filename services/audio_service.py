@@ -272,11 +272,7 @@ class AudioService:
 
     def load_model(self):
         gpu_ids = os.getenv('CUDA_VISIBLE_DEVICES')
-        if gpu_ids is not None:
-            device_ids = [int(id) for id in gpu_ids.split(',')]
-        else:
-            device_ids = list(range(torch.cuda.device_count()))
-        device = torch.device(f'cuda:{device_ids[0]}' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {gpu_ids}")
         self.transcribe_para_former_model = AutoModel(
             model="paraformer-zh",
             model_revision="v2.0.4",
@@ -287,7 +283,7 @@ class AudioService:
             spk_model="cam++",
             spk_model_revision="v2.0.2",
             batch_size=4,
-            device=device
+            device=f"cuda:{gpu_ids}"
         )
 
         print("Models loaded successfully")
