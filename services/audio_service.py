@@ -272,20 +272,31 @@ class AudioService:
 
     def load_model(self):
         gpu_ids = os.getenv('CUDA_VISIBLE_DEVICES')
+        if gpu_ids is None:
+            gpu_ids = 0
+        else:
+            gpu_ids = int(gpu_ids)
         print(f"Using device: {gpu_ids}")
+        # self.transcribe_para_former_model = AutoModel(
+        #     model="paraformer-zh",
+        #     model_revision="v2.0.4",
+        #     vad_model="fsmn-vad",
+        #     vad_model_revision="v2.0.4",
+        #     punc_model="ct-punc-c",
+        #     punc_model_revision="v2.0.4",
+        #     spk_model="cam++",
+        #     spk_model_revision="v2.0.2",
+        #     batch_size=4,
+        #     device=f"cuda:{gpu_ids}"
+        # )
         self.transcribe_para_former_model = AutoModel(
-            model="paraformer-zh",
-            model_revision="v2.0.4",
-            vad_model="fsmn-vad",
-            vad_model_revision="v2.0.4",
-            punc_model="ct-punc-c",
-            punc_model_revision="v2.0.4",
-            spk_model="cam++",
-            spk_model_revision="v2.0.2",
-            batch_size=4,
-            device=f"cuda:{gpu_ids}"
+                model="pre_model/paraformer-zh/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1",
+                vad_model="pre_model/fsmn-vad/fsmn-vad",
+                punc_model="pre_model/ct-punc-c/ct-punc",
+                spk_model="pre_model/cam++/speech_campplus_sv_zh-cn_16k-common",
+                batch_size=4,
+                device=f"cuda:{gpu_ids}"
         )
-
         print("Models loaded successfully")
 
     def transcribe_para_former(self, file_path: str):
