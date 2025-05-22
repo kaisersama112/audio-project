@@ -9,6 +9,8 @@ import glob
 import asyncio
 from datetime import datetime
 from typing import Optional
+from urllib.parse import quote
+
 import httpx
 from fastapi import APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Query, Form
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -223,7 +225,7 @@ async def download_single_segment(task_id: str, segment_index: int):
                 buffer,
                 media_type="audio/mpeg",
                 headers={
-                    "Content-Disposition": f'attachment; filename="{safe_filename}"',
+                    "Content-Disposition": f"attachment; filename*=utf-8''{quote(safe_filename)}",
                 }
             )
     else:
@@ -257,7 +259,7 @@ async def download_single_segment(task_id: str, segment_index: int):
             media_type="audio/mpeg",
             filename=safe_filename,
             headers={
-                "Content-Disposition": f'attachment; filename="{safe_filename}"'
+                "Content-Disposition": f"attachment; filename*=utf-8''{quote(safe_filename)}",
             }
         )
 

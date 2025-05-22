@@ -11,6 +11,8 @@ import glob
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
+
+import torch
 from pydub import AudioSegment
 from config import hotword_list, TEMP_DIR
 import time
@@ -269,7 +271,12 @@ class AudioService:
         self.model = None
 
     def load_model(self):
-
+        gpu_ids = os.getenv('CUDA_VISIBLE_DEVICES')
+        if gpu_ids is not None:
+            device_ids = [int(id) for id in gpu_ids.split(',')]
+        else:
+            device_ids = list(range(torch.cuda.device_count()))
+        device = torch.device(f'cuda:{device_ids[0]}' if torch.cuda.is_available() else 'cpu')
         self.transcribe_para_former_model = AutoModel(
             model="paraformer-zh",
             model_revision="v2.0.4",
@@ -280,6 +287,7 @@ class AudioService:
             spk_model="cam++",
             spk_model_revision="v2.0.2",
             batch_size=4,
+            device=device
         )
 
         print("Models loaded successfully")
@@ -513,7 +521,7 @@ class AudioService:
         total_segments = len(merged_segments)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        # with concurrent.futures.ProcessPoolExecutor(max_workers=5) as executor:
+            # with concurrent.futures.ProcessPoolExecutor(max_workers=5) as executor:
             # 创建任务列表
             futures = []
             for idx, merged_seg in enumerate(merged_segments):
@@ -528,7 +536,6 @@ class AudioService:
                     task_id=task_id
                 )
                 futures.append(future)
-
             # 使用 map 方法保持结果顺序
             for i, (future, merged_seg) in enumerate(zip(futures, merged_segments)):
                 try:

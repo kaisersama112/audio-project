@@ -76,4 +76,5 @@ ENV OMP_NUM_THREADS=1 \
     TF_ENABLE_ONEDNN_OPTS=0
 
 EXPOSE 7005
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7005", "--workers", "3"]
+#CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7005", "--workers", "3"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:7005", "--workers", "2", "main:app"]
