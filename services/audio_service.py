@@ -256,10 +256,10 @@ class AudioService:
         self.model = None
         self.inference_pipeline = pipeline(
             task=Tasks.auto_speech_recognition,
-            model="pre_model/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            vad_model="pre_model/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-            punc_model="pre_model/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-            spk_model="pre_model/speech_campplus_sv_zh-cn_16k-common",
+            model="iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+            vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+            punc_model="iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+            spk_model="iic/speech_campplus_sv_zh-cn_16k-common",
             disable_update=True,
         )
 

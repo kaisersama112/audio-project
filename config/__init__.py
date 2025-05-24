@@ -50,5 +50,7 @@ base_url = "https://audio.cqhuancheng.cn/"
 pipeline_queue = queue.Queue()
 # 模型队列计数器
 created_instances = 0
-
+NUM_WORKERS =4
+# 任务队列
+task_queue = queue.Queue()
 

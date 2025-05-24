@@ -3,7 +3,7 @@ import threading
 import torch
 from fastapi import FastAPI
 from starlette.staticfiles import StaticFiles
-from config import settings
+from config import settings, NUM_WORKERS
 import glob
 import asyncio
 from datetime import datetime
@@ -23,7 +23,7 @@ from config import pipeline_queue, TEMP_DIR, created_instances
 from models.schemas import TranscribeResponse, TaskStatusResponse, PaginatedSegments, ChunkUploadResponse
 from services.audio_service import format_task_merged_filename, extract_index_from_filename, \
     load_segments_if_completed, convert_to_wav, merge_with_ffmpeg, validate_audio_file, process_audio_task, AudioService
-
+from celery_task import celery_process_audio_task
 from utils.mysql_db import get_db_connection, get_task, create_task, get_task_results, get_all_task_results
 from utils.mysql_db import init_db
 
@@ -35,7 +35,7 @@ app.mount("/temp_audio_files", StaticFiles(directory=TEMP_DIR), name="temp_audio
 @app.on_event("startup")
 async def startup_event():
     init_db()
-    create_pipelines_thread(3)
+    create_pipelines_thread(NUM_WORKERS)
 
 
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -112,7 +112,7 @@ async def upload_chunk(
 async def merge_chunks(
         task_id: str = Form(...),
         min_chunk_duration: float = Form(3.0),  # 最小分片时长，单位秒
-        background_tasks: BackgroundTasks = None
+        # background_tasks: BackgroundTasks = None
 ):
     if not min_chunk_duration or min_chunk_duration == "":
         min_chunk_duration = 3.0
@@ -142,8 +142,8 @@ async def merge_chunks(
                 "start_time": None
             })
             conn.commit()
-        background_tasks.add_task(process_audio_task, task_id, original_path, ".wav", min_chunk_duration)
-
+        # background_tasks.add_task(process_audio_task, task_id, original_path, ".wav", min_chunk_duration)
+        celery_process_audio_task.delay(task_id, original_path, ".wav", min_chunk_duration)
         return JSONResponse({
             "task_id": task_id,
             "status": "pending",

@@ -13,9 +13,6 @@ pypinyin
 pyopenjtalk>=0.3.4
 g2p_en
 torchaudio
-# modelscope==1.10.0
-# funasr==0.8.7
-modelscope==1.26.0
 funasr==1.2.6
 sentencepiece
 transformers
@@ -40,4 +37,10 @@ pyannote.audio==3.3.2
 oss2==2.19.1
 tenacity
 pymysql
+celery
+eventlet
+redis
+modelscope==1.26.0
+termcolor==2.4.0
 datasets==2.16.0
+simplejson
