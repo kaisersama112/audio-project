@@ -6,33 +6,36 @@
 @Date    ：29/4/2025 下午4:51
 """
 import concurrent
+import threading
 from datetime import datetime
 import glob
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
 
-import torch
+from modelscope import pipeline, Tasks
 from pydub import AudioSegment
-from config import hotword_list, TEMP_DIR
+from config import hotword_list, TEMP_DIR, pipeline_queue
 import time
-from funasr import AutoModel
+# from funasr import AutoModel
 import os
 import subprocess
-
+import time
 from models.schemas import Segment
 from services.oss_service import oss_service
 from utils.mysql_db import update_task_status, get_db_connection
 import asyncio
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-# 定义最大并发数和全局锁
-MAX_CONCURRENT_TASKS = 20
-TRANSCRIBE_LOCK = asyncio.Lock()
+
+
+# # 定义最大并发数和全局锁
+# MAX_CONCURRENT_TASKS = 20
+# TRANSCRIBE_LOCK = asyncio.Lock()
 
 # 使用信号量限制总并发数量
-semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
-
+# semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+# ------------------------新解决方案----------------------
 
 def convert_to_wav(input_path: str, output_path: str):
     """
@@ -96,94 +99,76 @@ def merge_progress_callback(task_id, progress, message):
 
 
 async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float):
-    async with semaphore:  # 控制最多 20 个任务并发
-        task_dir = os.path.join(TEMP_DIR, task_id)
-        start_time = time.time()  # 开始计时
-        try:
-            update_status(task_id, "processing", "开始处理音频文件", 0)
-            stage_start_time = time.time()
-            if original_ext.lower() != '.wav':
-                update_status(task_id, "processing", "正在转换音频格式", 10)
-                wav_path = os.path.join(task_dir, "audio.wav")
-                await asyncio.to_thread(convert_to_wav, original_path, wav_path)
-                processing_path = wav_path
-            else:
-                processing_path = original_path
-                update_status(task_id, "processing", "音频格式无需转换", 10)
-            print(f"Task {task_id} - 音频格式处理耗时: {time.time() - stage_start_time:.2f}秒")
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    start_time = time.time()  # 开始计时
+    audio_service = pipeline_queue.get()
+    try:
+        update_status(task_id, "processing", "开始处理音频文件", 0)
+        stage_start_time = time.time()
+        if original_ext.lower() != '.wav':
+            update_status(task_id, "processing", "正在转换音频格式", 10)
+            wav_path = os.path.join(task_dir, "audio.wav")
+            convert_to_wav(original_path, wav_path)
+            processing_path = wav_path
+        else:
+            processing_path = original_path
+            update_status(task_id, "processing", "音频格式无需转换", 10)
+        print(f"Task {task_id} - 音频格式处理耗时: {time.time() - stage_start_time:.2f}秒")
+        update_status(task_id, "processing", "开始语音识别", 20)
+        stage_start_time = time.time()
+        result = audio_service.transcribe_para_former(processing_path)
+        print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
+        # 发音人合并
+        update_status(task_id, "processing", "合并发音人信息", 30)
+        stage_start_time = time.time()
+        raw_segments = result[0]
+        raw_segments = raw_segments['sentence_info']
+        merged_segments = audio_service.merge_segments(
+            task_id,
+            raw_segments,
+            min_chunk_duration,
+            merge_progress_callback
+        )
+        print(f"Task {task_id} - 合并发音人信息耗时: {time.time() - stage_start_time:.2f}秒")
 
-            update_status(task_id, "processing", "开始语音识别", 20)
-            stage_start_time = time.time()
+        update_status(task_id, "processing", "格式化识别结果", 60)
+        stage_start_time = time.time()
 
-            # 使用锁确保 transcribe_para_former 是串行调用
-            async with TRANSCRIBE_LOCK:
-                result = await asyncio.to_thread(
-                    audio_service.transcribe_para_former,
-                    processing_path
-                )
-            print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
+        # 保存所有分片到本地
+        segments_paths = audio_service.split_segments(
+            merged_segments,
+            processing_path,
+            task_id,
+            split_progress_callback
+        )
+        print(f"Task {task_id} - 分割音频片段耗时: {time.time() - stage_start_time:.2f}秒")
 
-            # 发音人合并
-            update_status(task_id, "processing", "合并发音人信息", 30)
-            stage_start_time = time.time()
-            raw_segments = result[0]["sentence_info"]
-            merged_segments = await asyncio.to_thread(
-                audio_service.merge_segments,
-                task_id,
-                raw_segments,
-                min_chunk_duration,
-                merge_progress_callback
-            )
-            print(f"Task {task_id} - 合并发音人信息耗时: {time.time() - stage_start_time:.2f}秒")
+        # 结果保存阶段
+        update_status(task_id, "processing", "保存识别结果", 95)
+        stage_start_time = time.time()
+        from config import base_url
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                for idx, segment_path, merged_seg in segments_paths:
+                    cursor.execute('''
+                        INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker, `url`)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ''', (
+                        task_id,
+                        idx,
+                        merged_seg.get("start"),
+                        merged_seg.get("end"),
+                        merged_seg.get("text"),
+                        str(merged_seg.get("spk")),
+                        base_url + segment_path.replace("\\", "/")
+                    ))
+                conn.commit()
+        print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
 
-            update_status(task_id, "processing", "格式化识别结果", 60)
-            stage_start_time = time.time()
-
-            # 保存所有分片到本地
-            segments_paths = await asyncio.to_thread(
-                audio_service.split_segments,
-                merged_segments,
-                processing_path,
-                task_id,
-                split_progress_callback
-            )
-            print(f"Task {task_id} - 分割音频片段耗时: {time.time() - stage_start_time:.2f}秒")
-
-            # 结果保存阶段
-            update_status(task_id, "processing", "保存识别结果", 95)
-            stage_start_time = time.time()
-            from config import base_url
-            with get_db_connection() as conn:
-                with conn.cursor() as cursor:
-                    for idx, segment_path, merged_seg in segments_paths:
-                        cursor.execute('''
-                            INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker, `url`)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ''', (
-                            task_id,
-                            idx,
-                            merged_seg.get("start"),
-                            merged_seg.get("end"),
-                            merged_seg.get("text"),
-                            str(merged_seg.get("spk")),
-                            base_url + segment_path.replace("\\", "/")
-                        ))
-                    conn.commit()
-            print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
-
-            update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
-            print(f"Task {task_id} - 总耗时: {time.time() - start_time:.2f}秒")
-
-        except Exception as e:
-            update_task_status({
-                "task_id": task_id,
-                "status": "failed",
-                "message": "处理过程中发生错误",
-                "progress": 100,
-                "error": str(e),
-                "complete_time": datetime.now().isoformat()
-            })
-            print(f"Task {task_id} - 处理失败，耗时: {time.time() - start_time:.2f}秒")
+        update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
+        print(f"Task {task_id} - 总耗时: {time.time() - start_time:.2f}秒")
+    finally:
+        pipeline_queue.put(audio_service)
 
 
 def merge_with_ffmpeg(task_dir: str, output_path: str):
@@ -269,55 +254,22 @@ class AudioService:
     def __init__(self):
         self.transcribe_para_former_model = None
         self.model = None
-
-    def load_model(self):
-        gpu_ids = os.getenv('CUDA_VISIBLE_DEVICES')
-        if gpu_ids is None:
-            gpu_ids = 0
-        else:
-            gpu_ids = int(gpu_ids)
-        print(f"Using device: {gpu_ids}")
-        # self.transcribe_para_former_model = AutoModel(
-        #     model="paraformer-zh",
-        #     model_revision="v2.0.4",
-        #     vad_model="fsmn-vad",
-        #     vad_model_revision="v2.0.4",
-        #     punc_model="ct-punc-c",
-        #     punc_model_revision="v2.0.4",
-        #     spk_model="cam++",
-        #     spk_model_revision="v2.0.2",
-        #     batch_size=4,
-        #     device=f"cuda:{gpu_ids}"
-        # )
-        self.transcribe_para_former_model = AutoModel(
-                model="pre_model/paraformer-zh/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1",
-                vad_model="pre_model/fsmn-vad/fsmn-vad",
-                punc_model="pre_model/ct-punc-c/ct-punc",
-                spk_model="pre_model/cam++/speech_campplus_sv_zh-cn_16k-common",
-                batch_size=4,
-                device=f"cuda:{gpu_ids}"
+        self.inference_pipeline = pipeline(
+            task=Tasks.auto_speech_recognition,
+            model="pre_model/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+            vad_model="pre_model/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+            punc_model="pre_model/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+            spk_model="pre_model/speech_campplus_sv_zh-cn_16k-common",
+            disable_update=True,
         )
-        print("Models loaded successfully")
 
     def transcribe_para_former(self, file_path: str):
-        """
-        max_single_segment_time=1000 * 10,  # 控制单句话的最大结束时间 10秒
-        enable_semantic_sentence_detection=True,  # 启用语义句子检测
-        max_end_silence=1000 * 2,  # 控制单句话的最大结束静音时间 2秒
-        batch_size_s=500,
-        batch_size_threshold_s=0.1,
-        """
-        result = self.transcribe_para_former_model.generate(
-            input=file_path,
-            batch_size_token=4000,  # 减少单批次的 token 数量，避免显存不足
-            batch_size_token_threshold_s=30,  # 将长语音片段分割为不超过 30 秒的批次
-            max_single_segment_time=5000,  # 单个语音片段最大时长为 5 秒
-            hotword=",".join(hotword_list),
-            vad=True,
-            punc=True,
-            spk=True
-        )
-        return result
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"音频文件不存在: {file_path}")
+        asr_result = self.inference_pipeline(input=file_path, batch_size_token=4000,
+                                             batch_size_token_threshold_s=30,
+                                             max_single_segment_time=5000)
+        return asr_result
 
     def _upload_single_segment(self, segment_path: str, task_id: str, seg: dict, idx: int) -> Dict:
         """单个片段的上传任务"""
@@ -403,6 +355,7 @@ class AudioService:
 
     def merge_segments(self, task_id: str, raw_segments: list, min_chunk_duration: float, progress_callback) -> list:
         """合并连续相同说话人的片段，基于最小时长要求"""
+
         if not raw_segments:
             progress_callback(task_id, 100, "无片段需要合并")
             return []
@@ -527,13 +480,9 @@ class AudioService:
         duration_ms = len(audio)
         total_segments = len(merged_segments)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            # with concurrent.futures.ProcessPoolExecutor(max_workers=5) as executor:
-            # 创建任务列表
-            futures = []
-            for idx, merged_seg in enumerate(merged_segments):
-                future = executor.submit(
-                    self._save_merged_segment,
+        for idx, merged_seg in enumerate(merged_segments):
+            try:
+                segment_path = self._save_merged_segment(
                     audio=audio,
                     duration_ms=duration_ms,
                     original_path=file_path,
@@ -542,18 +491,10 @@ class AudioService:
                     index=idx,
                     task_id=task_id
                 )
-                futures.append(future)
-            # 使用 map 方法保持结果顺序
-            for i, (future, merged_seg) in enumerate(zip(futures, merged_segments)):
-                try:
-                    segment_path = future.result()
-                    segment_url = f"{segment_path}"
-                    segments_paths.append((i, segment_url, merged_seg))
-                    if i % 100 == 0:
-                        progress = int(((i + 1) / total_segments) * 100)
-                        progress_callback(task_id, progress, f"已保存 {i + 1} 个片段")
-                except Exception as e:
-                    print(f"保存片段 {idx} 失败: {str(e)}")
+                segments_paths.append((idx, segment_path, merged_seg))
+                progress_callback(task_id, int(((idx + 1) / total_segments) * 100), f"已保存 {idx + 1} 个片段")
+            except Exception as e:
+                print(f"保存片段 {idx} 失败: {str(e)}")
         return segments_paths
 
     def upload_segments(self, segments_paths, task_id):
@@ -594,6 +535,3 @@ class AudioService:
         # 按开始时间排序
         formatted_results.sort(key=lambda x: x.get("start", 0))
         return formatted_results
-
-
-audio_service = AudioService()

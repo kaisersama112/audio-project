@@ -9,6 +9,6 @@ docker run  -v /home/ubuntu/audio-project/temp_audio_files:/app/temp_audio_files
 # v4 多服务器运行方式
 
 ```cmd
-docker build -t audio-split-server-v4.
+docker build -t audio-split-server-v4 .
 docker-compose up --build --force-recreate --scale app_gpu0=1 --scale app_gpu1=1
 ```

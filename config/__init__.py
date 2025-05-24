@@ -6,6 +6,7 @@
 @Date    ：29/4/2025 下午4:50 
 """
 import os
+import queue
 
 
 class BaseConfig:
@@ -44,4 +45,10 @@ hotword_list = [
 ]
 
 TEMP_DIR = "temp_audio_files"
-base_url="https://audio.cqhuancheng.cn/"
+base_url = "https://audio.cqhuancheng.cn/"
+# 模型队列
+pipeline_queue = queue.Queue()
+# 模型队列计数器
+created_instances = 0
+
+

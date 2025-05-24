@@ -8,13 +8,15 @@ ffmpeg-python
 onnxruntime; sys_platform == 'darwin'
 onnxruntime-gpu; sys_platform != 'darwin'
 tqdm
-funasr==1.0.27
 cn2an
 pypinyin
 pyopenjtalk>=0.3.4
 g2p_en
 torchaudio
-modelscope==1.10.0
+# modelscope==1.10.0
+# funasr==0.8.7
+modelscope==1.26.0
+funasr==1.2.6
 sentencepiece
 transformers
 chardet
@@ -38,4 +40,4 @@ pyannote.audio==3.3.2
 oss2==2.19.1
 tenacity
 pymysql
-modelscope[replicate]==2.2.1
+datasets==2.16.0

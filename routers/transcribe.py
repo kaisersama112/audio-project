@@ -24,8 +24,8 @@ import zipfile
 from starlette.responses import FileResponse
 
 from config import TEMP_DIR
-from models.schemas import TranscribeResponse, Segment, TaskStatusResponse, PaginatedSegments, ChunkUploadResponse
-from services.audio_service import audio_service, format_task_merged_filename, extract_index_from_filename, \
+from models.schemas import TranscribeResponse, TaskStatusResponse, PaginatedSegments, ChunkUploadResponse
+from services.audio_service import format_task_merged_filename, extract_index_from_filename, \
     load_segments_if_completed, convert_to_wav, merge_with_ffmpeg, validate_audio_file, process_audio_task
 from utils.file_utils import cleanup_task
 from utils.mysql_db import get_db_connection, get_task, create_task, get_task_results, update_task_status, \
