@@ -102,7 +102,16 @@ async def merge_chunks(
         merge_with_ffmpeg(task_dir, original_path)
         if not validate_audio_file(original_path):
             raise HTTPException(400, "合并文件格式异常")
+
         with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT task_id FROM ai_tasks WHERE task_id = %s", (task_id,))
+                existing_task = cursor.fetchone()
+
+                if existing_task:
+                    # 如果任务已存在，可以选择更新任务状态或者其他操作
+                    # 这里示例直接返回错误信息
+                    raise HTTPException(status_code=409, detail="任务已存在")
             create_task(conn, {
                 "task_id": task_id,
                 "status": "pending",
