@@ -176,10 +176,18 @@ def get_task_results(conn, task_id, keyword=None, speaker=None, page=1, per_page
             WHERE task_id = %s
         '''
         params = [task_id]
-
         if keyword:
-            query += " AND (text LIKE %s OR speaker LIKE %s)"
-            params.extend([f"%{keyword}%", f"%{keyword}%"])
+            # 使用正则表达式分割关键词，支持多种分隔符
+            keywords = re.split(r'[;,；，]', keyword)
+            keywords = [k.strip() for k in keywords if k.strip()]
+            if keywords:
+                # 构造多个 LIKE 条件
+                like_conditions = []
+                for _ in keywords:
+                    like_conditions.append("(text LIKE %s OR speaker LIKE %s)")
+                query += " AND " + " AND ".join(like_conditions)
+                for keyword in keywords:
+                    params.extend([f"%{keyword}%", f"%{keyword}%"])
 
         if speaker:
             query += " AND speaker LIKE %s"

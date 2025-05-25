@@ -517,33 +517,57 @@ async def delete_segments(
     except Exception as e:
         raise HTTPException(500, detail=f"批量删除分段时出错: {str(e)}")
 
-@router.delete("/segments_all", summary="删除全部")
-async def delete_segments_all(
+@router.delete("/segments_keyword", summary="删除包含全部关键词的分段")
+async def delete_segments_keyword(
     task_id: str,
+    keyword: str  # 多个采用分号隔开
 ):
-    """删除指定任务的所有分段数据及任务本身"""
+    """删除指定任务中包含全部关键词的分段数据"""
     try:
+        # 验证任务是否存在及状态
         with get_db_connection() as conn:
+            task = get_task(conn, task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="任务不存在")
+            if task['status'] != "completed":
+                raise HTTPException(status_code=425, detail="任务尚未完成")
+
+            # 构造关键词列表
+            keywords = re.split(r'[;,；，]', keyword)
+            keywords = [f"%{k.strip()}%" for k in keywords if k.strip()]
+
+            if not keywords:
+                raise HTTPException(status_code=400, detail="关键词不能为空")
+
+            # 构造查询条件
+            query = '''
+                DELETE FROM ai_task_results 
+                WHERE task_id = %s
+            '''
+            params = [task_id]
+
+            # 添加关键词匹配条件
+            for i, keyword in enumerate(keywords):
+                if i == 0:
+                    query += " AND (text LIKE %s OR speaker LIKE %s"
+                    params.extend([keyword, keyword])
+                else:
+                    query += " AND text LIKE %s AND speaker LIKE %s"
+                    params.extend([keyword, keyword])
+            query += ")"
+
             with conn.cursor() as cursor:
-                # 删除 ai_task_results 中该任务的所有分段
-                cursor.execute(
-                    "DELETE FROM ai_task_results WHERE task_id = %s",
-                    (task_id,)
-                )
-                # 删除 ai_tasks 中该任务
-                cursor.execute(
-                    "DELETE FROM ai_tasks WHERE id = %s",
-                    (task_id,)
-                )
+                cursor.execute(query, params)
                 conn.commit()
 
-                # 检查 ai_task_results 是否有行被删除
-                if cursor.rowcount < 0:  # 因为先删除 ai_task_results 可能返回 0 行，而删除 ai_tasks 可能成功
-                    raise HTTPException(404, detail=f"任务 {task_id} 不存在或已无分段")
+                # 检查是否有行被删除
+                if cursor.rowcount == 0:
+                    raise HTTPException(status_code=404, detail="未找到匹配的分段")
 
-                return {"message": f"任务 {task_id} 及其所有分段已删除"}
+            return {"message": f"任务 {task_id} 中包含全部关键词的分段已删除"}
+
     except Exception as e:
-        raise HTTPException(500, detail=f"删除任务及其分段时出错: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"删除分段时出错: {str(e)}")
 
 
 @router.get("/speakers/{task_id}", summary="获取发音人列表")
