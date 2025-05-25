@@ -517,10 +517,10 @@ async def delete_segments(
     except Exception as e:
         raise HTTPException(500, detail=f"批量删除分段时出错: {str(e)}")
 
-@router.delete("/segments_keyword", summary="删除包含全部关键词的分段")
+@router.delete("/segments_keyword/{task_id}", summary="删除包含全部关键词的分段")
 async def delete_segments_keyword(
     task_id: str,
-    keyword: str  # 多个采用分号隔开
+    keyword: str =Query(...,description="关键词")
 ):
     """删除指定任务中包含全部关键词的分段数据"""
     try:
