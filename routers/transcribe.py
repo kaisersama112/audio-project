@@ -573,7 +573,10 @@ async def delete_segments_keyword(
                 if cursor.rowcount == 0:
                     raise HTTPException(status_code=404, detail="未找到匹配的分段")
 
-            return {"message": f"任务 {task_id} 中包含全部关键词的分段已删除"}
+            return {
+                "code":200,
+                "message": f"任务 {task_id} 中包含全部关键词的分段已删除",
+            }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除分段时出错: {str(e)}")
