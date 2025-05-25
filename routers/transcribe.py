@@ -267,7 +267,9 @@ async def download_single_segment(task_id: str, segment_index: int):
 @router.get("/download/bulk/{task_id}", responses={
     200: {"content": {"application/zip": {}}, "description": "返回ZIP压缩包"}},
             summary="多音频下载")
-async def download_bulk_segments(task_id: str, indices: str = Query(..., description="逗号分隔的原始索引列表")):
+async def download_bulk_segments(task_id: str,
+                                 indices: str = Query(...,
+                                                                    description="逗号分隔的原始索引列表")):
     with get_db_connection() as conn_task:
         task = get_task(conn_task, task_id)
         if not task:
@@ -514,6 +516,34 @@ async def delete_segments(
                 return {"message": f"任务 {task_id} 下索引为 {indices} 的分段已删除"}
     except Exception as e:
         raise HTTPException(500, detail=f"批量删除分段时出错: {str(e)}")
+
+@router.delete("/segments_all", summary="删除全部")
+async def delete_segments_all(
+    task_id: str,
+):
+    """删除指定任务的所有分段数据及任务本身"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # 删除 ai_task_results 中该任务的所有分段
+                cursor.execute(
+                    "DELETE FROM ai_task_results WHERE task_id = %s",
+                    (task_id,)
+                )
+                # 删除 ai_tasks 中该任务
+                cursor.execute(
+                    "DELETE FROM ai_tasks WHERE id = %s",
+                    (task_id,)
+                )
+                conn.commit()
+
+                # 检查 ai_task_results 是否有行被删除
+                if cursor.rowcount < 0:  # 因为先删除 ai_task_results 可能返回 0 行，而删除 ai_tasks 可能成功
+                    raise HTTPException(404, detail=f"任务 {task_id} 不存在或已无分段")
+
+                return {"message": f"任务 {task_id} 及其所有分段已删除"}
+    except Exception as e:
+        raise HTTPException(500, detail=f"删除任务及其分段时出错: {str(e)}")
 
 
 @router.get("/speakers/{task_id}", summary="获取发音人列表")

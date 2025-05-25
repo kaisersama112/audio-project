@@ -1,5 +1,5 @@
 # 第一阶段：构建阶段（使用CUDA开发镜像）
-FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/nvidia/cuda:12.2.2-base-ubuntu22.04 as builder
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/nvidia/cuda:12.2.2-base-ubuntu22.04 AS builder
 # 设置时区和系统环境
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Shanghai \
@@ -51,6 +51,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
     python3.10 \
+    python3-pip \
     ffmpeg \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/* && \
@@ -76,5 +77,5 @@ ENV OMP_NUM_THREADS=1 \
     TF_ENABLE_ONEDNN_OPTS=0
 
 EXPOSE 7005
-#CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7005", "--workers", "3"]
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:7005", "--workers", "2", "main:app"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7005", "--workers", "2"]
+#CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:7005", "--workers", "2", "main:app"]

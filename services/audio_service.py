@@ -11,8 +11,6 @@ import glob
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
-
-import torch
 from pydub import AudioSegment
 from config import hotword_list, TEMP_DIR
 import time
@@ -27,11 +25,9 @@ import asyncio
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 # 定义最大并发数和全局锁
-MAX_CONCURRENT_TASKS = 20
+
 TRANSCRIBE_LOCK = asyncio.Lock()
 
-# 使用信号量限制总并发数量
-semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 
 def convert_to_wav(input_path: str, output_path: str):
@@ -96,94 +92,94 @@ def merge_progress_callback(task_id, progress, message):
 
 
 async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float):
-    async with semaphore:  # 控制最多 20 个任务并发
-        task_dir = os.path.join(TEMP_DIR, task_id)
-        start_time = time.time()  # 开始计时
-        try:
-            update_status(task_id, "processing", "开始处理音频文件", 0)
-            stage_start_time = time.time()
-            if original_ext.lower() != '.wav':
-                update_status(task_id, "processing", "正在转换音频格式", 10)
-                wav_path = os.path.join(task_dir, "audio.wav")
-                await asyncio.to_thread(convert_to_wav, original_path, wav_path)
-                processing_path = wav_path
-            else:
-                processing_path = original_path
-                update_status(task_id, "processing", "音频格式无需转换", 10)
-            print(f"Task {task_id} - 音频格式处理耗时: {time.time() - stage_start_time:.2f}秒")
 
-            update_status(task_id, "processing", "开始语音识别", 20)
-            stage_start_time = time.time()
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    start_time = time.time()  # 开始计时
+    try:
+        update_status(task_id, "processing", "开始处理音频文件", 0)
+        stage_start_time = time.time()
+        if original_ext.lower() != '.wav':
+            update_status(task_id, "processing", "正在转换音频格式", 10)
+            wav_path = os.path.join(task_dir, "audio.wav")
+            await asyncio.to_thread(convert_to_wav, original_path, wav_path)
+            processing_path = wav_path
+        else:
+            processing_path = original_path
+            update_status(task_id, "processing", "音频格式无需转换", 10)
+        print(f"Task {task_id} - 音频格式处理耗时: {time.time() - stage_start_time:.2f}秒")
 
-            # 使用锁确保 transcribe_para_former 是串行调用
-            async with TRANSCRIBE_LOCK:
-                result = await asyncio.to_thread(
-                    audio_service.transcribe_para_former,
-                    processing_path
-                )
-            print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
+        update_status(task_id, "processing", "开始语音识别", 20)
+        stage_start_time = time.time()
 
-            # 发音人合并
-            update_status(task_id, "processing", "合并发音人信息", 30)
-            stage_start_time = time.time()
-            raw_segments = result[0]["sentence_info"]
-            merged_segments = await asyncio.to_thread(
-                audio_service.merge_segments,
-                task_id,
-                raw_segments,
-                min_chunk_duration,
-                merge_progress_callback
+        # 使用锁确保 transcribe_para_former 是串行调用
+        async with TRANSCRIBE_LOCK:
+            result = await asyncio.to_thread(
+                audio_service.transcribe_para_former,
+                processing_path
             )
-            print(f"Task {task_id} - 合并发音人信息耗时: {time.time() - stage_start_time:.2f}秒")
+        print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
 
-            update_status(task_id, "processing", "格式化识别结果", 60)
-            stage_start_time = time.time()
+        # 发音人合并
+        update_status(task_id, "processing", "合并发音人信息", 30)
+        stage_start_time = time.time()
+        raw_segments = result[0]["sentence_info"]
+        merged_segments = await asyncio.to_thread(
+            audio_service.merge_segments,
+            task_id,
+            raw_segments,
+            min_chunk_duration,
+            merge_progress_callback
+        )
+        print(f"Task {task_id} - 合并发音人信息耗时: {time.time() - stage_start_time:.2f}秒")
 
-            # 保存所有分片到本地
-            segments_paths = await asyncio.to_thread(
-                audio_service.split_segments,
-                merged_segments,
-                processing_path,
-                task_id,
-                split_progress_callback
-            )
-            print(f"Task {task_id} - 分割音频片段耗时: {time.time() - stage_start_time:.2f}秒")
+        update_status(task_id, "processing", "格式化识别结果", 60)
+        stage_start_time = time.time()
 
-            # 结果保存阶段
-            update_status(task_id, "processing", "保存识别结果", 95)
-            stage_start_time = time.time()
-            from config import base_url
-            with get_db_connection() as conn:
-                with conn.cursor() as cursor:
-                    for idx, segment_path, merged_seg in segments_paths:
-                        cursor.execute('''
-                            INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker, `url`)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ''', (
-                            task_id,
-                            idx,
-                            merged_seg.get("start"),
-                            merged_seg.get("end"),
-                            merged_seg.get("text"),
-                            str(merged_seg.get("spk")),
-                            base_url + segment_path.replace("\\", "/")
-                        ))
-                    conn.commit()
-            print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
+        # 保存所有分片到本地
+        segments_paths = await asyncio.to_thread(
+            audio_service.split_segments,
+            merged_segments,
+            processing_path,
+            task_id,
+            split_progress_callback
+        )
+        print(f"Task {task_id} - 分割音频片段耗时: {time.time() - stage_start_time:.2f}秒")
 
-            update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
-            print(f"Task {task_id} - 总耗时: {time.time() - start_time:.2f}秒")
+        # 结果保存阶段
+        update_status(task_id, "processing", "保存识别结果", 95)
+        stage_start_time = time.time()
+        from config import base_url
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                for idx, segment_path, merged_seg in segments_paths:
+                    url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
+                    cursor.execute('''
+                        INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker, `url`)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ''', (
+                        task_id,
+                        idx,
+                        merged_seg.get("start"),
+                        merged_seg.get("end"),
+                        merged_seg.get("text"),
+                        str(merged_seg.get("spk")),
+                        base_url + url
+                    ))
+                conn.commit()
+        print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
 
-        except Exception as e:
-            update_task_status({
-                "task_id": task_id,
-                "status": "failed",
-                "message": "处理过程中发生错误",
-                "progress": 100,
-                "error": str(e),
-                "complete_time": datetime.now().isoformat()
-            })
-            print(f"Task {task_id} - 处理失败，耗时: {time.time() - start_time:.2f}秒")
+        update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
+        print(f"Task {task_id} - 总耗时: {time.time() - start_time:.2f}秒")
+    except Exception as e:
+        update_task_status({
+            "task_id": task_id,
+            "status": "failed",
+            "message": "处理过程中发生错误",
+            "progress": 100,
+            "error": str(e),
+            "complete_time": datetime.now().isoformat()
+        })
+        print(f"Task {task_id} - 处理失败，耗时: {time.time() - start_time:.2f}秒")
 
 
 def merge_with_ffmpeg(task_dir: str, output_path: str):
@@ -202,7 +198,7 @@ def merge_with_ffmpeg(task_dir: str, output_path: str):
         "-f", "concat",
         "-safe", "0",
         "-i", concat_list,
-        "-c", "copy",
+        "-b:a", "128k",
         "-map_metadata", "0",
         output_path
     ]
@@ -272,31 +268,14 @@ class AudioService:
 
     def load_model(self):
         gpu_ids = os.getenv('CUDA_VISIBLE_DEVICES')
-        if gpu_ids is None:
-            gpu_ids = 0
-        else:
-            gpu_ids = int(gpu_ids)
-        print(f"Using device: {gpu_ids}")
-        # self.transcribe_para_former_model = AutoModel(
-        #     model="paraformer-zh",
-        #     model_revision="v2.0.4",
-        #     vad_model="fsmn-vad",
-        #     vad_model_revision="v2.0.4",
-        #     punc_model="ct-punc-c",
-        #     punc_model_revision="v2.0.4",
-        #     spk_model="cam++",
-        #     spk_model_revision="v2.0.2",
-        #     batch_size=4,
-        #     device=f"cuda:{gpu_ids}"
-        # )
         self.transcribe_para_former_model = AutoModel(
-                model="pre_model/paraformer-zh/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8358-tensorflow1",
-                vad_model="pre_model/fsmn-vad/fsmn-vad",
-                punc_model="pre_model/ct-punc-c/ct-punc",
-                spk_model="pre_model/cam++/speech_campplus_sv_zh-cn_16k-common",
-                batch_size=4,
-                device=f"cuda:{gpu_ids}"
+            model="paraformer-zh",
+            vad_model="fsmn-vad",
+            punc_model="ct-punc-c",
+            spk_model="cam++",
+            batch_size=4
         )
+
         print("Models loaded successfully")
 
     def transcribe_para_former(self, file_path: str):
@@ -543,6 +522,7 @@ class AudioService:
                     task_id=task_id
                 )
                 futures.append(future)
+
             # 使用 map 方法保持结果顺序
             for i, (future, merged_seg) in enumerate(zip(futures, merged_segments)):
                 try:
