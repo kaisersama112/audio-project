@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI
+from starlette.responses import HTMLResponse
 from starlette.staticfiles import StaticFiles
 
 from config import settings
@@ -20,6 +21,12 @@ async def startup_event():
 TEMP_DIR = "temp_audio_files"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+@app.get("/status",summary="服务检查")
+def status():
+    return {
+        "status":200,
+        "message":"OK"
+    }
 
 app.mount("/temp_audio_files", StaticFiles(directory=TEMP_DIR), name="temp_audio_files")
 if __name__ == "__main__":
