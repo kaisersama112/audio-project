@@ -19,6 +19,7 @@ class BaseConfig:
     use_fp16 = True
     cache_dir = "./cache"
 
+
 OSS_CONFIG = {
     "access_key_id": "LTAI5tGE9kR3DQYcFWJfKkk8",
     "access_key_secret": "bngm8wNfbMw9oFcjiNJaIgRJ93Czvc",
@@ -44,4 +45,5 @@ hotword_list = [
 
 TEMP_DIR = "temp_audio_files"
 
-base_url="https://audio.cqhuancheng.cn/"
+base_url = "https://audio.cqhuancheng.cn/"
+# base_url = "http://117.50.46.144:31838/"

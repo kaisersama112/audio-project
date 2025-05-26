@@ -278,7 +278,7 @@ async def download_single_segment(task_id: str, segment_index: int):
             summary="多音频下载")
 async def download_bulk_segments(task_id: str,
                                  indices: str = Query(...,
-                                                                    description="逗号分隔的原始索引列表")):
+                                                      description="逗号分隔的原始索引列表")):
     with get_db_connection() as conn_task:
         task = get_task(conn_task, task_id)
         if not task:
@@ -526,10 +526,11 @@ async def delete_segments(
     except Exception as e:
         raise HTTPException(500, detail=f"批量删除分段时出错: {str(e)}")
 
+
 @router.delete("/segments_keyword/{task_id}", summary="删除包含全部关键词的分段")
 async def delete_segments_keyword(
-    task_id: str,
-    keyword: str =Query(...,description="关键词")
+        task_id: str,
+        keyword: str = Query(..., description="关键词")
 ):
     """删除指定任务中包含全部关键词的分段数据"""
     try:
@@ -547,7 +548,6 @@ async def delete_segments_keyword(
 
             if not keywords:
                 raise HTTPException(status_code=400, detail="关键词不能为空")
-
             # 构造查询条件
             query = '''
                 DELETE FROM ai_task_results 
@@ -574,7 +574,7 @@ async def delete_segments_keyword(
                     raise HTTPException(status_code=404, detail="未找到匹配的分段")
 
             return {
-                "code":200,
+                "code": 200,
                 "message": f"任务 {task_id} 中包含全部关键词的分段已删除",
             }
 
