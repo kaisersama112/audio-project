@@ -64,7 +64,7 @@ class OSSService:
             )
 
             if result.status == 200:
-                res_data=result.resp.response
+                res_data = result.resp.response
                 return res_data.url
             raise Exception("Upload failed")
 
@@ -75,11 +75,3 @@ class OSSService:
 
 
 oss_service = OSSService()
-
-# if __name__ == '__main__':
-#
-#     data=oss_service.upload_file(
-#         r"F:\python_project\audio-project\pythonProject\audio-split-src\temp\audio\20250510115240.wav",
-#                             "111"
-#     )
-#     print(data)

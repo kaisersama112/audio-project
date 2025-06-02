@@ -6,28 +6,38 @@
 @Date    ：29/4/2025 下午4:51
 """
 import concurrent
+import aiofiles
+import zipfile
 from datetime import datetime
 import glob
 import re
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from typing import Dict
+
+from fastapi import HTTPException
 from pydub import AudioSegment
-from config import hotword_list, TEMP_DIR
+from sqlalchemy.orm import Session
+
+from config import base_url
+from config import hotword_list, TEMP_DIR, DOWNLOAD_DIR
 import time
-from funasr import AutoModel
 import os
 import subprocess
+from modelscope.pipelines import pipeline
+from modelscope.utils.constant import Tasks
 
+from curd.models import AITaskResult, AIDownloadTask
 from models.schemas import Segment
 from services.oss_service import oss_service
-from utils.mysql_db import update_task_status, get_db_connection
+
+from curd.crud import get_db, update_task_status, get_task
 import asyncio
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 # 定义最大并发数和全局锁
 
 TRANSCRIBE_LOCK = asyncio.Lock()
-
 
 
 def convert_to_wav(input_path: str, output_path: str):
@@ -53,20 +63,21 @@ def update_status(task_id, status: str, message: str, progress: int, complete_ti
     :param progress: 进度
     :return: None
     """
-    if complete_time:
-        update_task_status({
+    with get_db() as db:
+        if complete_time:
+            update_task_status(db, {
+                "task_id": task_id,
+                "status": status,
+                "message": message,
+                "progress": progress,
+                "complete_time": complete_time
+            })
+        update_task_status(db, {
             "task_id": task_id,
             "status": status,
             "message": message,
             "progress": progress,
-            "complete_time": complete_time
         })
-    update_task_status({
-        "task_id": task_id,
-        "status": status,
-        "message": message,
-        "progress": progress,
-    })
 
 
 def split_progress_callback(task_id, progress, message):
@@ -91,8 +102,7 @@ def merge_progress_callback(task_id, progress, message):
     update_status(task_id, "processing", f"合并片段: {message}", 30 + int(progress * 0.3))
 
 
-async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float):
-
+async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float, separate):
     task_dir = os.path.join(TEMP_DIR, task_id)
     start_time = time.time()  # 开始计时
     try:
@@ -115,7 +125,8 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         async with TRANSCRIBE_LOCK:
             result = await asyncio.to_thread(
                 audio_service.transcribe_para_former,
-                processing_path
+                processing_path,
+                separate
             )
         print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
 
@@ -148,38 +159,145 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         # 结果保存阶段
         update_status(task_id, "processing", "保存识别结果", 95)
         stage_start_time = time.time()
-        from config import base_url
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                for idx, segment_path, merged_seg in segments_paths:
-                    url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
-                    cursor.execute('''
-                        INSERT INTO ai_task_results (task_id, `index`, start, `end`, text, speaker, `url`)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ''', (
-                        task_id,
-                        idx,
-                        merged_seg.get("start"),
-                        merged_seg.get("end"),
-                        merged_seg.get("text"),
-                        str(merged_seg.get("spk")),
-                        base_url + url
-                    ))
-                conn.commit()
+
+        with get_db() as db:
+            for idx, segment_path, merged_seg in segments_paths:
+                url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
+                # 创建 AITaskResult 对象并添加到数据库
+                db.add(
+                    AITaskResult(
+                        task_id=task_id,
+                        index=idx,
+                        start=merged_seg.get("start"),
+                        end=merged_seg.get("end"),
+                        text=merged_seg.get("text"),
+                        speaker=str(merged_seg.get("spk")),
+                        url=base_url + url
+                    )
+                )
+            db.commit()
         print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
 
         update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
         print(f"Task {task_id} - 总耗时: {time.time() - start_time:.2f}秒")
     except Exception as e:
-        update_task_status({
-            "task_id": task_id,
-            "status": "failed",
-            "message": "处理过程中发生错误",
-            "progress": 100,
-            "error": str(e),
-            "complete_time": datetime.now().isoformat()
-        })
-        print(f"Task {task_id} - 处理失败，耗时: {time.time() - start_time:.2f}秒")
+        with get_db() as conn:
+            update_task_status(conn, {
+                "task_id": task_id,
+                "status": "failed",
+                "message": "处理过程中发生错误",
+                "progress": 100,
+                "error": str(e),
+                "complete_time": datetime.now().isoformat()
+            })
+            print(f"Task {task_id} - 处理失败，耗时: {time.time() - start_time:.2f}秒")
+    finally:
+        # 清空原始数据 ，只保留切片数据
+        for chunk in sorted(glob.glob(os.path.join(task_dir, "chunk_*.wav"))):
+            os.remove(chunk)
+        os.remove(original_path)
+
+
+async def process_download_task(
+        download_task_id: str,
+        task_id: str,
+        indices: str,
+        download_type: str
+):
+    print("进入下载异步任务")
+    try:
+        with get_db() as conn_task:
+            task = get_task(conn_task, task_id)
+            if not task:
+                return
+
+        base_dir = os.path.join(TEMP_DIR, task_id)
+        segments_dir = os.path.join(base_dir, "merged_segments")
+        if not os.path.exists(segments_dir):
+            return
+
+        with get_db() as db:
+            download_task = db.query(AIDownloadTask).filter(AIDownloadTask.task_id == download_task_id).first()
+            if not download_task:
+                return
+            download_task.status = 'processing'
+            download_task.updated_at = datetime.now()
+            db.commit()
+
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+            if download_type == "bulk":
+                try:
+                    target_indices = [int(idx) for idx in indices.split(',') if idx.strip()]
+                except ValueError:
+                    target_indices = []
+
+                outer_folder = f"{task_id}_segments_bulk_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+                for index in target_indices:
+                    filename = format_task_merged_filename(task_id, index)
+                    file_path = os.path.join(segments_dir, filename)
+
+                    if os.path.exists(file_path):
+                        async with aiofiles.open(file_path, 'rb') as f:
+                            content = await f.read()
+                            zip_file.writestr(f"{outer_folder}/{filename}", content)
+                    else:
+                        print(f"警告：索引 {index} 对应的文件 {file_path} 不存在，已跳过")
+                        continue
+
+            elif download_type == "all":
+                outer_folder = f"{task_id}_all_segments_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+                with get_db() as conn_status:
+                    results = conn_status.query(AITaskResult).filter(
+                        AITaskResult.task_id == task_id
+                    ).all()
+                    if not results:
+                        print("警告：任务结果为空")
+                        pass  # 可以不报错，只是后面不会打包任何内容
+
+                for file_name in os.listdir(segments_dir):
+                    file_path = os.path.join(segments_dir, file_name)
+
+                    if os.path.isfile(file_path):
+                        async with aiofiles.open(file_path, 'rb') as f:
+                            content = await f.read()
+                            zip_file.writestr(f"{outer_folder}/{file_name}", content)
+                    else:
+                        print(f"警告：路径 {file_path} 不是文件，已跳过")
+                        continue
+
+        zip_buffer.seek(0)
+
+        # 保存压缩包到本地
+        download_filename = f"{outer_folder}.zip"
+        download_path = os.path.join(DOWNLOAD_DIR, download_filename)
+        async with aiofiles.open(download_path, 'wb') as f:
+            await f.write(zip_buffer.read())
+
+        # 更新数据库状态
+        with get_db() as db:
+            download_task = db.query(AIDownloadTask).filter(AIDownloadTask.task_id == download_task_id).first()
+            if not download_task:
+                return
+            download_task.status = 'completed'
+            download_task.progress = 100
+            segment_path = base_url + download_path
+            url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
+            download_task.file_url = url
+            download_task.download_path = download_path
+            download_task.updated_at = datetime.now()
+            db.commit()
+
+    except Exception as e:
+        print(f"处理下载任务时发生错误: {e}")
+        with get_db() as db:
+            download_task = db.query(AIDownloadTask).filter(AIDownloadTask.task_id == download_task_id).first()
+            if download_task:
+                download_task.status = 'failed'
+                download_task.updated_at = datetime.now()
+                db.commit()
 
 
 def merge_with_ffmpeg(task_dir: str, output_path: str):
@@ -232,15 +350,17 @@ def validate_audio_file(file_path: str):
         raise RuntimeError(error_msg)
 
 
-def load_segments_if_completed(conn, task_id):
+def load_segments_if_completed(db: Session, task_id: str):
     """
     检查任务是否已完成，如果完成则加载结果
     """
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM ai_task_results WHERE task_id = %s ORDER BY `index`", (task_id,))
-            results = cursor.fetchall()
-        return [Segment(**val) for val in results]
+        # 使用 SQLAlchemy 的查询方法获取结果
+        results = db.query(AITaskResult).filter(AITaskResult.task_id == task_id).order_by(AITaskResult.index).all()
+
+        # 将查询结果转换为 Segment 对象列表
+        segment_list = [Segment(**val.__dict__) for val in results]
+        return segment_list
     except Exception as e:
         return f"Error loading segments: {str(e)}"
 
@@ -267,30 +387,55 @@ class AudioService:
         self.model = None
 
     def load_model(self):
-        gpu_ids = os.getenv('CUDA_VISIBLE_DEVICES')
-        self.transcribe_para_former_model = AutoModel(
-            model="paraformer-zh",
-            vad_model="fsmn-vad",
-            punc_model="ct-punc-c",
-            spk_model="cam++",
+        # self.ans_model = pipeline(
+        #     Tasks.acoustic_noise_suppression,
+        #     model='pre_model/speech_frcrn_ans_cirm_16k')
+        #
+        # self.transcribe_para_former_model = pipeline(
+        #     task=Tasks.auto_speech_recognition,
+        #     model="pre_model/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+        #     vad_model="pre_model/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        #     punc_model="pre_model/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+        #     spk_model="pre_model/speech_campplus_sv_zh-cn_16k-common",
+        #     disable_update=True,
+        #     batch_size=4
+        # )
+        self.ans_model = pipeline(
+            Tasks.acoustic_noise_suppression,
+            model='iic/speech_frcrn_ans_cirm_16k')
+
+        self.transcribe_para_former_model = pipeline(
+            task=Tasks.auto_speech_recognition,
+            model="iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+            vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+            punc_model="iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+            spk_model="iic/speech_campplus_sv_zh-cn_16k-common",
+            disable_update=True,
             batch_size=4
         )
 
         print("Models loaded successfully")
 
-    def transcribe_para_former(self, file_path: str):
+    def transcribe_para_former(self, file_path: str, separate: bool):
         """
-        max_single_segment_time=1000 * 10,  # 控制单句话的最大结束时间 10秒
-        enable_semantic_sentence_detection=True,  # 启用语义句子检测
-        max_end_silence=1000 * 2,  # 控制单句话的最大结束静音时间 2秒
-        batch_size_s=500,
-        batch_size_threshold_s=0.1,
+        根据 separate 参数决定是否先进行人声分离再进行语音识别。
+
+        :param file_path: 原始音频文件路径
+        :param separate: 是否启用人声与背景音分离
+        :return: 识别结果
         """
-        result = self.transcribe_para_former_model.generate(
+        if separate:
+            ans_result = self.ans_model(
+                file_path,
+                output_path=file_path
+            )
+            # print(ans_result)
+        # 不做分离，直接识别原始音频
+        result = self.transcribe_para_former_model(
             input=file_path,
-            batch_size_token=4000,  # 减少单批次的 token 数量，避免显存不足
-            batch_size_token_threshold_s=30,  # 将长语音片段分割为不超过 30 秒的批次
-            max_single_segment_time=5000,  # 单个语音片段最大时长为 5 秒
+            batch_size_token=4000,
+            batch_size_token_threshold_s=30,
+            max_single_segment_time=5000,
             hotword=",".join(hotword_list),
             vad=True,
             punc=True,

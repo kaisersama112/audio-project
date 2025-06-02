@@ -45,5 +45,7 @@ hotword_list = [
 
 TEMP_DIR = "temp_audio_files"
 
+DOWNLOAD_DIR = os.path.join(TEMP_DIR, "downloads")
+
 base_url = "https://audio.cqhuancheng.cn/"
 # base_url = "http://117.50.46.144:31838/"

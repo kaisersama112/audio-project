@@ -19,8 +19,13 @@ class Segment(BaseModel):
     suffix: Optional[str] = None
 
 
-class TranscribeResponse(BaseModel):
-    task_id: str
+class PaginatedSegments(BaseModel):
+    items: List[Segment]
+    total: int
+    page: int
+    per_page: int
+    total_pages: int
+    search_hits: int = Field(..., description="包含关键字的记录总数")
 
 
 # 修改状态响应模型
@@ -38,14 +43,6 @@ class TaskStatusResponse(BaseModel):
     data: Optional[List[Segment]] = None
 
 
-
-class PaginatedSegments(BaseModel):
-    items: List[Segment]
-    total: int
-    page: int
-    per_page: int
-    total_pages: int
-    search_hits: int = Field(..., description="包含关键字的记录总数")
 
 
 # 分片上传响应模型

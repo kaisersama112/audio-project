@@ -170,6 +170,7 @@ def get_speaker(conn, task_id, index):
         result = cursor.fetchone()
     return result['speaker'] if result else None
 
+
 def get_task_results(conn, task_id, keyword=None, speaker=None, page=1, per_page=10):
     with conn.cursor() as cursor:
         query = '''
@@ -177,25 +178,31 @@ def get_task_results(conn, task_id, keyword=None, speaker=None, page=1, per_page
             WHERE task_id = %s
         '''
         params = [task_id]
+
+        # 处理关键词部分
         if keyword:
             # 使用正则表达式分割关键词，支持多种分隔符
             keywords = re.split(r'[;,；，]', keyword)
             keywords = [k.strip() for k in keywords if k.strip()]
             if keywords:
-                # 构造多个 LIKE 条件
+                # 构造多个 (text LIKE %s OR speaker LIKE %s) 条件，使用 OR 连接
                 like_conditions = []
                 for _ in keywords:
                     like_conditions.append("(text LIKE %s OR speaker LIKE %s)")
-                query += " AND " + " AND ".join(like_conditions)
+                query += " AND (" + " OR ".join(like_conditions) + ")"
+                # 添加参数
                 for keyword in keywords:
                     params.extend([f"%{keyword}%", f"%{keyword}%"])
 
+        # 处理说话人筛选
         if speaker:
             query += " AND speaker LIKE %s"
             params.append(f"%{speaker}%")
 
+        # 排序
         query += " ORDER BY `index`"
 
+        # 执行查询
         cursor.execute(query, params)
         results = cursor.fetchall()
 
@@ -204,7 +211,6 @@ def get_task_results(conn, task_id, keyword=None, speaker=None, page=1, per_page
         total_pages = (total + per_page - 1) // per_page if per_page > 0 else 1
         start = (page - 1) * per_page
         end = start + per_page
-
         paginated_results = results[start:end]
 
         return {
@@ -224,3 +230,18 @@ def get_all_task_results(conn, task_id):  # 获取所有任务结果
         )
         results = cursor.fetchall()
     return results
+
+
+def delete_task_by_id(task_id):
+    """
+    删除指定任务的所有记录（包括主任务和结果）
+    :param task_id: 任务ID
+    :return: None
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            # 删除结果表中的记录
+            cursor.execute("DELETE FROM ai_task_results WHERE task_id = %s", (task_id,))
+            # 删除主任务表中的记录
+            cursor.execute("DELETE FROM ai_tasks WHERE task_id = %s", (task_id,))
+        conn.commit()
