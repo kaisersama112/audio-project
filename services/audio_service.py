@@ -105,19 +105,21 @@ def merge_progress_callback(task_id, progress, message):
 async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float, separate):
     task_dir = os.path.join(TEMP_DIR, task_id)
     start_time = time.time()  # 开始计时
+    update_status(task_id, "processing", "开始处理音频文件", 0)
+    stage_start_time = time.time()
+    if original_ext.lower() != '.wav':
+        update_status(task_id, "processing", "正在转换音频格式", 10)
+        wav_path = os.path.join(task_dir, "audio.wav")
+        await asyncio.to_thread(convert_to_wav, original_path, wav_path)
+        print(f"Task {task_id} - 音频格式转换耗时: {time.time() - stage_start_time:.2f}秒")
+        # 清理原始音频文件
+        os.remove(original_path)
+        processing_path = wav_path
+    else:
+        processing_path = original_path
+        update_status(task_id, "processing", "音频格式无需转换", 10)
+    print(f"Task {task_id} - 音频格式处理耗时: {time.time() - stage_start_time:.2f}秒")
     try:
-        update_status(task_id, "processing", "开始处理音频文件", 0)
-        stage_start_time = time.time()
-        if original_ext.lower() != '.wav':
-            update_status(task_id, "processing", "正在转换音频格式", 10)
-            wav_path = os.path.join(task_dir, "audio.wav")
-            await asyncio.to_thread(convert_to_wav, original_path, wav_path)
-            processing_path = wav_path
-        else:
-            processing_path = original_path
-            update_status(task_id, "processing", "音频格式无需转换", 10)
-        print(f"Task {task_id} - 音频格式处理耗时: {time.time() - stage_start_time:.2f}秒")
-
         update_status(task_id, "processing", "开始语音识别", 20)
         stage_start_time = time.time()
 
@@ -192,10 +194,28 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             })
             print(f"Task {task_id} - 处理失败，耗时: {time.time() - start_time:.2f}秒")
     finally:
-        # 清空原始数据 ，只保留切片数据
-        for chunk in sorted(glob.glob(os.path.join(task_dir, "chunk_*.wav"))):
-            os.remove(chunk)
-        os.remove(original_path)
+        # 清理原始数据，只保留切片数据
+        try:
+            # 清理原始音频文件（如果存在）
+            if os.path.exists(original_path):
+                os.remove(original_path)
+                print(f"Task {task_id} - 已清理原始音频文件: {original_path}")
+            # 清理处理后的音频文件（如果存在）
+            if os.path.exists(processing_path) and processing_path != original_path:
+                os.remove(processing_path)
+                print(f"Task {task_id} - 已清理处理后的音频文件: {processing_path}")
+            # 清理任务目录中的中间文件
+            for chunk in glob.glob(os.path.join(task_dir, "chunk_*.wav")):
+                os.remove(chunk)
+                print(f"Task {task_id} - 已清理中间文件: {chunk}")
+
+            # 如果任务目录为空，则删除目录
+            if os.path.exists(task_dir) and not os.listdir(task_dir):
+                os.rmdir(task_dir)
+                print(f"Task {task_id} - 已删除空任务目录: {task_dir}")
+
+        except Exception as e:
+            print(f"Task {task_id} - 清理文件时发生错误: {str(e)}")
 
 
 async def process_download_task(
@@ -387,32 +407,32 @@ class AudioService:
         self.model = None
 
     def load_model(self):
-        # self.ans_model = pipeline(
-        #     Tasks.acoustic_noise_suppression,
-        #     model='pre_model/speech_frcrn_ans_cirm_16k')
-        #
-        # self.transcribe_para_former_model = pipeline(
-        #     task=Tasks.auto_speech_recognition,
-        #     model="pre_model/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-        #     vad_model="pre_model/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-        #     punc_model="pre_model/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-        #     spk_model="pre_model/speech_campplus_sv_zh-cn_16k-common",
-        #     disable_update=True,
-        #     batch_size=4
-        # )
         self.ans_model = pipeline(
             Tasks.acoustic_noise_suppression,
-            model='iic/speech_frcrn_ans_cirm_16k')
+            model='pre_model/speech_frcrn_ans_cirm_16k')
 
         self.transcribe_para_former_model = pipeline(
             task=Tasks.auto_speech_recognition,
-            model="iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-            punc_model="iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-            spk_model="iic/speech_campplus_sv_zh-cn_16k-common",
+            model="pre_model/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+            vad_model="pre_model/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+            punc_model="pre_model/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+            spk_model="pre_model/speech_campplus_sv_zh-cn_16k-common",
             disable_update=True,
             batch_size=4
         )
+        # self.ans_model = pipeline(
+        #     Tasks.acoustic_noise_suppression,
+        #     model='iic/speech_frcrn_ans_cirm_16k')
+        #
+        # self.transcribe_para_former_model = pipeline(
+        #     task=Tasks.auto_speech_recognition,
+        #     model="iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+        #     vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        #     punc_model="iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+        #     spk_model="iic/speech_campplus_sv_zh-cn_16k-common",
+        #     disable_update=True,
+        #     batch_size=4
+        # )
 
         print("Models loaded successfully")
 

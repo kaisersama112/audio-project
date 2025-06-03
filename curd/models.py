@@ -4,6 +4,8 @@ from sqlalchemy import Column, String, Integer, Text, DateTime, Float, ForeignKe
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 
+from config import MysqlConfig
+
 Base = declarative_base()
 
 
@@ -42,7 +44,7 @@ class AITaskResult(Base):
 class AIDownloadTask(Base):
     __tablename__ = 'ai_download_tasks'
     id = Column(Integer, primary_key=True, autoincrement=True)  # 使用自增整数作为主键
-    task_id = Column(String(36), unique=True, nullable=False)   # 唯一的下载任务ID
+    task_id = Column(String(36), unique=True, nullable=False)  # 唯一的下载任务ID
     original_task_id = Column(String(36), nullable=False)  # 关联原始任务的
     status = Column(String(20), nullable=False, default='pending')
     progress = Column(Integer, nullable=False, default=0)
@@ -51,16 +53,17 @@ class AIDownloadTask(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.now)
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
+
 # 初始化数据库连接和会话
 def init_db():
     # 正式站数据库配置
     DB_CONFIG = {
-        "host": "1.14.127.39",
-        "user": "broadcast_ai",
-        "password": "2Afsp2cGCdk7dRf8",
-        "database": "broadcast_ai",
-        "port": 3388,
-        "charset": "utf8mb4"
+        "host": MysqlConfig.host,
+        "user": MysqlConfig.user,
+        "password": MysqlConfig.password,
+        "database": MysqlConfig.database,
+        "port": MysqlConfig.port,
+        "charset": MysqlConfig.charset
     }
 
     # 创建数据库连接字符串

@@ -42,3 +42,5 @@ librosa~=0.10.1
 soundfile~=0.13.1
 torchmetrics~=1.7.1
 aiofiles
+ufile
+common

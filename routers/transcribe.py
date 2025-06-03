@@ -5,34 +5,26 @@
 @Author  ：panshangguo
 @Date    ：29/4/2025 下午4:51 
 """
-import glob
-import asyncio
-import urllib
+
 from datetime import datetime
 from typing import Optional
 from urllib.parse import quote
 from uuid import uuid4
 
-import httpx
-from fastapi import APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Query, Form
-from fastapi.responses import JSONResponse, StreamingResponse
-from io import BytesIO
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Form
 import os
 import shutil
-import json
 import re
-import zipfile
 
 from starlette.responses import FileResponse
 
 from config import TEMP_DIR
-from curd.crud import get_db, create_task, update_task_status, get_task, get_task_results, get_all_task_results, \
-    delete_task, get_segments_by_indices, get_all_segments
+from curd.crud import get_db, create_task, get_task, get_task_results, get_segments_by_indices, get_all_segments
 from curd.models import AITaskResult, AIDownloadTask
-from models.schemas import TaskStatusResponse, PaginatedSegments, ChunkUploadResponse, Segment
-from services.audio_service import format_task_merged_filename, extract_index_from_filename, \
-    load_segments_if_completed, convert_to_wav, merge_with_ffmpeg, validate_audio_file, process_audio_task, \
+from models.schemas import TaskStatusResponse, PaginatedSegments, Segment
+from services.audio_service import format_task_merged_filename, load_segments_if_completed, process_audio_task, \
     process_download_task
+from utils.ucloud_u3d import UCloudFileDownloader
 
 router = APIRouter(tags=["音频切块"])
 
@@ -47,6 +39,7 @@ async def start_audio_processing(
         background_tasks: BackgroundTasks = None
 ):
     print("task_id:", task_id)
+    downloader = UCloudFileDownloader()
     task_dir = os.path.join(TEMP_DIR, task_id)
     with get_db() as db:
         existing_task = get_task(db, task_id)  # 使用之前定义的 get_task 函数
@@ -59,21 +52,23 @@ async def start_audio_processing(
         except Exception as e:
             raise HTTPException(500, f"创建任务目录失败: {str(e)}")
         # 下载音频文件
+        # 下载音频文件（使用UCloud下载器）
         try:
             # 确定下载文件的保存路径
-            # 这里假设音频是 wav 或 mp3 格式 - 根据实际需求调整
+            # 假设音频是 wav 或 mp3 格式 - 根据实际需求调整
             audio_filename = os.path.basename(file_url)
             audio_filename_lower = audio_filename.lower()
             if not audio_filename_lower.endswith(('.wav', '.mp3')):
                 raise HTTPException(400, "不支持的音频格式，仅支持 .wav 或 .mp3")
 
             download_path = os.path.join(task_dir, audio_filename)
+            print(f"下载路径: {download_path}")
+            # 使用UCloud下载器下载文件
+            download_success = downloader.download_file(file_url, download_path)
 
-            # 对 URL 编码处理，防止有空格或中文导致错误
-            encoded_url = urllib.parse.quote(file_url, safe=':/')
-            with urllib.request.urlopen(encoded_url) as response:
-                with open(download_path, 'wb') as out_file:
-                    shutil.copyfileobj(response, out_file)
+            if not download_success:
+                shutil.rmtree(task_dir, ignore_errors=True)
+                raise HTTPException(500, "从UCloud下载音频文件失败")
 
             print(f"音频文件已下载到: {download_path}")
         except Exception as e:
