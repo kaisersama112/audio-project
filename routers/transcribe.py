@@ -7,7 +7,7 @@
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -22,9 +22,10 @@ from config import TEMP_DIR
 from curd.crud import get_db, create_task, get_task, get_task_results, get_segments_by_indices, get_all_segments
 from curd.models import AITaskResult, AIDownloadTask
 from models.schemas import TaskStatusResponse, PaginatedSegments, Segment
+from models.ucloud import AuthRequest, PrivateUrlAuthRequest
 from services.audio_service import format_task_merged_filename, load_segments_if_completed, process_audio_task, \
     process_download_task
-from utils.ucloud_u3d import UCloudFileDownloader
+from utils.ucloud_u3d import UCloudFileDownloader, Authroizator
 
 router = APIRouter(tags=["音频切块"])
 
@@ -447,3 +448,18 @@ async def get_speakers(
             return [speaker[0] for speaker in speakers]
     except Exception as e:
         raise HTTPException(500, detail=f"获取发音人列表时出错: {str(e)}")
+
+
+# methods=['POST']
+
+@router.post("/applyAuth", summary="请求对象操作的API签名")
+async def apply_auth(request: AuthRequest) -> Dict[str, str]:
+    auth = Authroizator(request.model_dump())
+    return {"Authorization": auth.calculateAuthSignature()}
+
+
+@router.post("/applyPrivateUrlAuth", summary="请求私有Bucket的对象下载链接签名")
+async def apply_private_url_auth(request: PrivateUrlAuthRequest) -> Dict[str, str]:
+    auth = Authroizator(request.model_dump())
+    return {"Authorization": auth.calculatePrivateUrlAuthroization()}
+

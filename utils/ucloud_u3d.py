@@ -1,6 +1,65 @@
+import base64
+import hmac
+from hashlib import sha1
+from typing import Dict, Any
+
+from fastapi import HTTPException
 from ufile import config, filemanager
 
 from config import UCloudConfig
+
+PUBLIC_KEY = UCloudConfig.UCloud_file_public_key
+PRIVATE_KEY = UCloudConfig.UCloud_file_private_key
+
+
+class Authroizator:
+    def __init__(self, json_data: Dict[str, Any]):
+        self.json_data = json_data
+
+    def calculateAuthSignature(self) -> str:
+        """
+
+        """
+        # 参数校验
+        if not self.json_data.get("method") or not self.json_data.get("bucket"):
+            raise HTTPException(status_code=400, detail="'method' and 'bucket' are required!")
+
+        method = self.json_data.get("method")
+        bucket = self.json_data.get("bucket")
+        content_type = self.json_data.get("content_type", "")
+        content_md5 = self.json_data.get("content_md5", "")
+        date = self.json_data.get("date", "")
+        key = self.json_data.get("key", "")
+
+        content = f"{method}\n{content_md5}\n{content_type}\n{date}\n"
+        content += f"/{bucket}/{key}"
+
+        signature = self.__signature(content)
+        return f"UCloud {PUBLIC_KEY}:{signature}"
+
+    def calculatePrivateUrlAuthroization(self) -> str:
+        """
+
+        """
+        # 参数校验
+        required_fields = ["method", "bucket", "key", "expires"]
+        for field in required_fields:
+            if not self.json_data.get(field):
+                raise HTTPException(status_code=400, detail=f"'{field}' is required!")
+
+        method = self.json_data.get("method")
+        bucket = self.json_data.get("bucket")
+        key = self.json_data.get("key")
+        expires = str(self.json_data.get("expires"))
+
+        content = f"{method}\n\n\n{expires}\n"
+        content += f"/{bucket}/{key}"
+
+        return self.__signature(content)
+
+    def __signature(self, content: str) -> str:
+        hmac_res = hmac.new(PRIVATE_KEY.encode(), content.encode(), sha1).digest()
+        return base64.standard_b64encode(hmac_res).decode("utf-8")
 
 
 class UCloudFileDownloader:
