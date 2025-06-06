@@ -453,31 +453,31 @@ class AudioService:
         self.model = None
 
     def load_model(self):
-        # self.ans_model = pipeline(
-        #     Tasks.acoustic_noise_suppression,
-        #     model='pre_model/speech_frcrn_ans_cirm_16k')
-
-        # self.transcribe_para_former_model = pipeline(
-        #     task=Tasks.auto_speech_recognition,
-        #     model="pre_model/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-        #     vad_model="pre_model/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-        #     punc_model="pre_model/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-        #     spk_model="pre_model/speech_campplus_sv_zh-cn_16k-common",
-        #     disable_update=True,
-        #     batch_size=4
-        # )
         self.ans_model = pipeline(
             Tasks.acoustic_noise_suppression,
-            model='iic/speech_frcrn_ans_cirm_16k')
+            model='pre_model/speech_frcrn_ans_cirm_16k')
 
         self.transcribe_para_former_model = pipeline(
             task=Tasks.auto_speech_recognition,
-            model="iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-            punc_model="iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-            spk_model="iic/speech_campplus_sv_zh-cn_16k-common",
+            model="pre_model/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+            vad_model="pre_model/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+            punc_model="pre_model/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+            spk_model="pre_model/speech_campplus_sv_zh-cn_16k-common",
             disable_update=True,
             batch_size=4
+        )
+        # self.ans_model = pipeline(
+        #     Tasks.acoustic_noise_suppression,
+        #     model='iic/speech_frcrn_ans_cirm_16k')
+        #
+        # self.transcribe_para_former_model = pipeline(
+        #     task=Tasks.auto_speech_recognition,
+        #     model="iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+        #     vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        #     punc_model="iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+        #     spk_model="iic/speech_campplus_sv_zh-cn_16k-common",
+        #     disable_update=True,
+        #     batch_size=4
         )
 
         print("Models loaded successfully")
@@ -502,7 +502,7 @@ class AudioService:
             batch_size_token=4000,
             batch_size_token_threshold_s=60,
             max_single_segment_time=20000,  # 最大允许识别 20 秒的语音段
-            vad_speech_noise_ratio=0.5,
+            vad_speech_noise_ratio=0.1,
             hotword=",".join(hotword_list),
             vad=True,
             punc=True,
