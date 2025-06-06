@@ -14,8 +14,6 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from typing import Dict
-
-from fastapi import HTTPException
 from pydub import AudioSegment
 from sqlalchemy.orm import Session
 
@@ -61,6 +59,7 @@ def update_status(task_id, status: str, message: str, progress: int, complete_ti
     :param status: 状态
     :param message: 消息
     :param progress: 进度
+    :param complete_time: 创建时间
     :return: None
     """
     with get_db() as db:
@@ -88,7 +87,12 @@ def split_progress_callback(task_id, progress, message):
     :param message: 进度消息
     :return: None
     """
-    update_status(task_id, "processing", f"保存片段: {message}", 60 + int(progress * 0.3))
+    update_status(task_id=task_id,
+                  status="processing",
+                  message=f"保存片段: {message}",
+                  progress=60 + int(progress * 0.3),
+                  complete_time=None
+                  )
 
 
 def merge_progress_callback(task_id, progress, message):
@@ -218,10 +222,77 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             print(f"Task {task_id} - 清理文件时发生错误: {str(e)}")
 
 
+def get_task_result_dict_and_files(task_id: str, segments_dir: str):
+    """
+    获取 result_dict 和 file_list
+    """
+    with get_db() as conn:
+        results = conn.query(AITaskResult).filter(
+            AITaskResult.task_id == task_id
+        ).all()
+        result_dict = {r.index: r for r in results}
+
+    file_list = []
+    for file_name in os.listdir(segments_dir):
+        file_path = os.path.join(segments_dir, file_name)
+        if not os.path.isfile(file_path):
+            print(f"警告：路径 {file_path} 不是文件，已跳过")
+            continue
+        index = extract_index_from_filename(file_name)
+        if index is None:
+            print(f"无法从文件名 {file_name} 中提取索引")
+            continue
+        file_list.append((file_path, file_name))
+
+    return result_dict, file_list
+
+
+async def write_files_to_zip(
+        zip_file,
+        outer_folder: str,
+        file_list: list,
+        result_dict: dict,
+        task_id: str
+):
+    """
+     写入 ZIP 的统一函数
+    """
+    speaker_files = {}
+
+    # 分类 speaker
+    for file_path, file_name in file_list:
+        index = extract_index_from_filename(file_name)
+        result = result_dict.get(index)
+        speaker = result.speaker if result else "unknown"
+        if speaker not in speaker_files:
+            speaker_files[speaker] = []
+        speaker_files[speaker].append((file_path, file_name))
+
+    # 写入 ZIP
+    for speaker, files in speaker_files.items():
+        speaker_folder = os.path.join(outer_folder, speaker)
+        for file_path, file_name in files:
+            index = extract_index_from_filename(file_name)
+            result = result_dict.get(index)
+
+            if not result or not result.text:
+                print(f"未找到索引 {index} 的文本信息")
+                new_filename = f"{index}.mp3"
+            else:
+                safe_text = "".join(
+                    c if c.isalnum() or c in (" ", "_", "-") else "_" for c in result.text[:50]
+                )
+                new_filename = f"{safe_text}.mp3"
+
+            async with aiofiles.open(file_path, 'rb') as f:
+                content = await f.read()
+                zip_file.writestr(f"{speaker_folder}/{new_filename}", content)
+
+
 async def process_download_task(
         download_task_id: str,
         task_id: str,
-        indices: str,
+        indices: list[str] or None,
         download_type: str
 ):
     print("进入下载异步任务")
@@ -246,47 +317,24 @@ async def process_download_task(
 
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+            # 公共变量
+            result_dict, file_list = get_task_result_dict_and_files(task_id, segments_dir)
+
             if download_type == "bulk":
-                try:
-                    target_indices = [int(idx) for idx in indices.split(',') if idx.strip()]
-                except ValueError:
-                    target_indices = []
-
-                outer_folder = f"{task_id}_segments_bulk_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-                for index in target_indices:
-                    filename = format_task_merged_filename(task_id, index)
-                    file_path = os.path.join(segments_dir, filename)
-
-                    if os.path.exists(file_path):
-                        async with aiofiles.open(file_path, 'rb') as f:
-                            content = await f.read()
-                            zip_file.writestr(f"{outer_folder}/{filename}", content)
-                    else:
-                        print(f"警告：索引 {index} 对应的文件 {file_path} 不存在，已跳过")
-                        continue
+                outer_folder = f"{task_id}_bulk_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                # 过滤出 target_indices 对应的文件
+                target_indices = indices or []
+                filtered_file_list = [
+                    (fp, fn) for fp, fn in file_list
+                    if extract_index_from_filename(fn) in target_indices
+                ]
+                await write_files_to_zip(zip_file, outer_folder, filtered_file_list, result_dict, task_id)
 
             elif download_type == "all":
-                outer_folder = f"{task_id}_all_segments_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                outer_folder = f"{task_id}_all_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-                with get_db() as conn_status:
-                    results = conn_status.query(AITaskResult).filter(
-                        AITaskResult.task_id == task_id
-                    ).all()
-                    if not results:
-                        print("警告：任务结果为空")
-                        pass  # 可以不报错，只是后面不会打包任何内容
-
-                for file_name in os.listdir(segments_dir):
-                    file_path = os.path.join(segments_dir, file_name)
-
-                    if os.path.isfile(file_path):
-                        async with aiofiles.open(file_path, 'rb') as f:
-                            content = await f.read()
-                            zip_file.writestr(f"{outer_folder}/{file_name}", content)
-                    else:
-                        print(f"警告：路径 {file_path} 不是文件，已跳过")
-                        continue
+                # 使用所有文件
+                await write_files_to_zip(zip_file, outer_folder, file_list, result_dict, task_id)
 
         zip_buffer.seek(0)
 
@@ -392,10 +440,7 @@ def format_task_merged_filename(task_id: str, index: int, suffix: str = "mp3"):
 
 
 def extract_index_from_filename(filename):
-    """
-    从文件名中提取索引
-    """
-    match = re.search(r'merged_.*?_(\d{5})\.mp3$', filename)
+    match = re.search(r'merged_\d+_(\d{5})\.mp3$', filename)
     if match:
         return int(match.group(1))
     return None
@@ -403,6 +448,7 @@ def extract_index_from_filename(filename):
 
 class AudioService:
     def __init__(self):
+        self.ans_model = None
         self.transcribe_para_former_model = None
         self.model = None
 
@@ -444,18 +490,19 @@ class AudioService:
         :param separate: 是否启用人声与背景音分离
         :return: 识别结果
         """
+
         if separate:
-            ans_result = self.ans_model(
+            self.ans_model(
                 file_path,
                 output_path=file_path
             )
-            # print(ans_result)
         # 不做分离，直接识别原始音频
         result = self.transcribe_para_former_model(
             input=file_path,
             batch_size_token=4000,
-            batch_size_token_threshold_s=30,
-            max_single_segment_time=5000,
+            batch_size_token_threshold_s=60,
+            max_single_segment_time=20000,  # 最大允许识别 20 秒的语音段
+            vad_speech_noise_ratio=0.5,
             hotword=",".join(hotword_list),
             vad=True,
             punc=True,

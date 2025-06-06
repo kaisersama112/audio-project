@@ -7,25 +7,25 @@
 """
 
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Optional
 from urllib.parse import quote
 from uuid import uuid4
-
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Form
-import os
-import shutil
 import re
+import os
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Form
+
+import shutil
 
 from starlette.responses import FileResponse
 
 from config import TEMP_DIR
-from curd.crud import get_db, create_task, get_task, get_task_results, get_segments_by_indices, get_all_segments
+from curd.crud import get_db, create_task, get_task, get_task_results, get_segments_by_indices, get_all_segments, \
+    delete_segments_by_keywords, delete_segments_by_indices
 from curd.models import AITaskResult, AIDownloadTask
 from models.schemas import TaskStatusResponse, PaginatedSegments, Segment
-from models.ucloud import AuthRequest, PrivateUrlAuthRequest
 from services.audio_service import format_task_merged_filename, load_segments_if_completed, process_audio_task, \
     process_download_task
-from utils.ucloud_u3d import UCloudFileDownloader, Authroizator
+from utils.ucloud_u3d import UCloudFileDownloader
 
 router = APIRouter(tags=["音频切块"])
 
@@ -297,7 +297,6 @@ async def download_all_segments(
         conn.add(db_download_task)
         conn.commit()
         conn.refresh(db_download_task)
-
     background_tasks.add_task(process_download_task, download_task_id, task_id, None, "all")
 
     return {
@@ -340,30 +339,15 @@ async def delete_segments(
         raise HTTPException(404, detail="音频文件夹不存在")
 
     with get_db() as conn:
-        # 查询要删除的分段
-        results = conn.query(AITaskResult).filter(
-            AITaskResult.task_id == task_id,
-            AITaskResult.index.in_(segment_indices)
-        ).all()
-
-        if not results:
+        # 调用通用删除函数
+        deleted_indices = delete_segments_by_indices(conn, task_id, segment_indices)
+        if not deleted_indices:
             raise HTTPException(404, detail=f"任务 {task_id} 下指定的分段不存在")
 
-        # 提取文件名信息
-        file_paths = []
-        for segment in results:
-            file_name = format_task_merged_filename(task_id, segment.index)
-            file_paths.append(os.path.join(segments_dir, file_name))
-
-        # 删除数据库记录
-        conn.query(AITaskResult).filter(
-            AITaskResult.task_id == task_id,
-            AITaskResult.index.in_(segment_indices)
-        ).delete(synchronize_session=False)
-        conn.commit()
-
         # 删除本地文件
-        for file_path in file_paths:
+        for index in deleted_indices:
+            file_name = format_task_merged_filename(task_id, index)
+            file_path = os.path.join(segments_dir, file_name)
             if os.path.exists(file_path):
                 os.remove(file_path)
             else:
@@ -392,45 +376,31 @@ async def delete_segments_keyword(
         if not keywords:
             raise HTTPException(status_code=400, detail="关键词不能为空")
 
-        # 构建查询条件
-        query = conn.query(AITaskResult).filter(
-            AITaskResult.task_id == task_id
-        )
-        for k in keywords:
-            query = query.filter(
-                (AITaskResult.text.like(k)) | (AITaskResult.speaker.like(k))
-            )
-
-        # 查询匹配的记录
-        results = query.all()
-        if not results:
+        # 调用数据库操作函数，获取被删除的分段索引
+        deleted_indices = delete_segments_by_keywords(conn, task_id, keywords)
+        if not deleted_indices:
             raise HTTPException(status_code=404, detail="未找到匹配的分段")
 
-        # 提取文件名信息
-        file_paths = []
+        # 删除本地文件
         base_dir = os.path.join(TEMP_DIR, task_id)
         segments_dir = os.path.join(base_dir, "merged_segments")
-        for segment in results:
-            file_name = format_task_merged_filename(task_id, segment.index)
-            file_paths.append(os.path.join(segments_dir, file_name))
-
-        # 删除数据库记录
-        query.delete(synchronize_session=False)
-        conn.commit()
-
-        # 删除本地文件
-        if not os.path.exists(segments_dir):
-            print("音频文件夹不存在")
-        else:
-            for file_path in file_paths:
+        if os.path.exists(segments_dir):
+            for index in deleted_indices:
+                file_path = os.path.join(
+                    segments_dir,
+                    format_task_merged_filename(task_id, index)
+                )
                 if os.path.exists(file_path):
                     os.remove(file_path)
                 else:
                     print(f"文件不存在: {file_path}")
+        else:
+            print("音频文件夹不存在")
 
         return {
             "code": 200,
             "message": f"任务 {task_id} 中包含任意关键词的分段已删除",
+            "deleted_count": len(deleted_indices)
         }
 
 
@@ -448,18 +418,3 @@ async def get_speakers(
             return [speaker[0] for speaker in speakers]
     except Exception as e:
         raise HTTPException(500, detail=f"获取发音人列表时出错: {str(e)}")
-
-
-# methods=['POST']
-
-@router.post("/applyAuth", summary="请求对象操作的API签名")
-async def apply_auth(request: AuthRequest) -> Dict[str, str]:
-    auth = Authroizator(request.model_dump())
-    return {"Authorization": auth.calculateAuthSignature()}
-
-
-@router.post("/applyPrivateUrlAuth", summary="请求私有Bucket的对象下载链接签名")
-async def apply_private_url_auth(request: PrivateUrlAuthRequest) -> Dict[str, str]:
-    auth = Authroizator(request.model_dump())
-    return {"Authorization": auth.calculatePrivateUrlAuthroization()}
-

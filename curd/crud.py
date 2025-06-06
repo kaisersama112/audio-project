@@ -66,20 +66,28 @@ def get_task(db: Session, task_id: str):
     return db.query(AITask).filter(AITask.task_id == task_id).first()
 
 
-# 获取任务结果
+from sqlalchemy import or_
+
 def get_task_results(db: Session, task_id: str, keyword: str = None, speaker: str = None, page: int = 1,
                      per_page: int = 10):
+    """
+
+    """
     query = db.query(AITaskResult).filter(AITaskResult.task_id == task_id)
 
     # 筛选关键词
     if keyword:
         keywords = keyword.split(',')  # 假设关键词用逗号分隔
+        conditions = []
         for kw in keywords:
             kw = kw.strip()
             if kw:
-                query = query.filter(
+                conditions.append(
                     (AITaskResult.text.like(f"%{kw}%")) | (AITaskResult.speaker.like(f"%{kw}%"))
                 )
+        if conditions:
+            # 使用 OR 组合多个关键词条件
+            query = query.filter(or_(*conditions))
 
     # 筛选说话人
     if speaker:
@@ -134,3 +142,72 @@ def get_all_segments(db: Session, task_id: str):
         .filter(AITaskResult.task_id == task_id)
         .all()
     )
+
+
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
+
+def delete_segments_by_keywords(db: Session, task_id: str, keywords: list):
+    """
+    根据任务ID和关键词列表删除包含任意关键词的分段数据
+    :param db: 数据库会话
+    :param task_id: 任务ID
+    :param keywords: 关键词列表
+    :return: 被删除的分段索引列表
+    """
+    # 构建查询条件
+    query = db.query(AITaskResult).filter(AITaskResult.task_id == task_id)
+
+    # 使用 or_ 将多个关键词条件组合起来
+    conditions = []
+    for k in keywords:
+        conditions.append((AITaskResult.text.like(k)) | (AITaskResult.speaker.like(k)))
+
+    if conditions:
+        query = query.filter(or_(*conditions))
+    else:
+        return []  # 没有关键词条件，直接返回空列表
+
+    # 查询匹配的记录
+    results = query.all()
+    if not results:
+        return []  # 没有匹配的记录
+
+    # 记录被删除的分段索引
+    deleted_indices = [seg.index for seg in results]
+
+    # 删除数据库记录
+    query.delete(synchronize_session=False)
+    db.commit()
+
+    return deleted_indices
+
+def delete_segments_by_indices(db: Session, task_id: str, indices: list):
+    """
+    根据任务ID和分段索引列表删除分段数据
+    :param db: 数据库会话
+    :param task_id: 任务ID
+    :param indices: 分段索引列表
+    :return: 被删除的分段索引列表
+    """
+    # 查询要删除的分段
+    results = db.query(AITaskResult).filter(
+        AITaskResult.task_id == task_id,
+        AITaskResult.index.in_(indices)
+    ).all()
+
+    if not results:
+        return []
+
+    # 记录被删除的分段索引
+    deleted_indices = [seg.index for seg in results]
+
+    # 删除数据库记录
+    db.query(AITaskResult).filter(
+        AITaskResult.task_id == task_id,
+        AITaskResult.index.in_(indices)
+    ).delete(synchronize_session=False)
+    db.commit()
+
+    return deleted_indices

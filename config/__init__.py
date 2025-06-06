@@ -78,8 +78,8 @@ class UCloudConfig:
     """
     UCloud_file_public_key = "4eZCa18pxZ7GGHmWzV4PL2IiA1HHnMc2H"
     UCloud_file_private_key = "FAFUxPmdnJsD6vKpBe3SiGEcoXEzAuwiSLpoLR18L2FX"
-    UCloud_file_bucket = "aiaudio"
+    UCloud_file_bucket = "aipublic"
     neiwang = ".internal-cn-wlcb.ufileos.com"
     waiwang = ".cn-wlcb.ufileos.com"
-    UCloud_file_upload_suffix = neiwang
-    UCloud_file_download_suffix = neiwang
+    UCloud_file_upload_suffix = waiwang
+    UCloud_file_download_suffix = waiwang
