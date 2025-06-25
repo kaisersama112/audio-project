@@ -20,6 +20,10 @@ docker run  -v /home/ubuntu/audio_temp_audio_files:/app/temp_audio_files -d --gp
 docker run -d --gpus '"device=GPU-472005c6-3cbb-22a4-8eaf-70beed892fc2"' -v /home/ubuntu/audio_temp_audio_files:/app/temp_audio_files -p 7006:7006 --name audio-split-server-v4 audio-split-server-v4
 
 ```
+# 最新
+```cmd
+ docker run  -v /home/ubuntu/audio_temp_audio_files:/app/temp_audio_files -d --gpus all -p 7005:7005 --name audio-split-server-v1 audio-split-server
+```
 
 
 # 容器操作记录

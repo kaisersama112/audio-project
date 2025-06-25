@@ -48,8 +48,10 @@ TEMP_DIR = "temp_audio_files"
 DOWNLOAD_DIR = os.path.join(TEMP_DIR, "downloads")
 # 正式站
 base_url = "https://audio.cqhuancheng.cn/"
+
+
 # 测试站
-base_url = "http://117.50.217.225:7005/"
+# base_url = "https://audiotest.cqhckj.cn/"
 
 
 class MysqlConfig:
@@ -57,19 +59,19 @@ class MysqlConfig:
     mysql 配置
     """
     # ---------正式站--------------
-    # host = "1.14.127.39"
-    # user = "broadcast_ai"
-    # password = "2Afsp2cGCdk7dRf8"
-    # database = "broadcast_ai"
-    # port = 3388
-    # charset = "utf8mb4"
-    # ---------测试站--------------
-    host = "123.57.150.136"
+    host = "1.14.127.39"
     user = "broadcast_ai"
-    password = "eMRtryH6LcpidGRR"
+    password = "2Afsp2cGCdk7dRf8"
     database = "broadcast_ai"
-    port = 3306
+    port = 3388
     charset = "utf8mb4"
+    # ---------测试站--------------
+    # host = "123.57.150.136"
+    # user = "broadcast_ai"
+    # password = "eMRtryH6LcpidGRR"
+    # database = "broadcast_ai"
+    # port = 3306
+    # charset = "utf8mb4"
 
 
 class UCloudConfig:
@@ -81,5 +83,5 @@ class UCloudConfig:
     UCloud_file_bucket = "aipublic"
     neiwang = ".internal-cn-wlcb.ufileos.com"
     waiwang = ".cn-wlcb.ufileos.com"
-    UCloud_file_upload_suffix = waiwang
-    UCloud_file_download_suffix = waiwang
+    UCloud_file_upload_suffix = neiwang
+    UCloud_file_download_suffix = neiwang

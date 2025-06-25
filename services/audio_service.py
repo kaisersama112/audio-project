@@ -134,11 +134,15 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
                 processing_path,
                 separate
             )
+            # 添加结果检查
+            if not isinstance(result, list) or len(result) == 0 or not isinstance(result[0], dict):
+                raise ValueError(f"Invalid transcription result: {result}")
         print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
 
         # 发音人合并
         update_status(task_id, "processing", "合并发音人信息", 30)
         stage_start_time = time.time()
+
         raw_segments = result[0]["sentence_info"]
         merged_segments = await asyncio.to_thread(
             audio_service.merge_segments,
@@ -247,18 +251,13 @@ def get_task_result_dict_and_files(task_id: str, segments_dir: str):
     return result_dict, file_list
 
 
-async def write_files_to_zip(
-        zip_file,
-        outer_folder: str,
-        file_list: list,
-        result_dict: dict,
-        task_id: str
-):
-    """
-     写入 ZIP 的统一函数
-    """
-    speaker_files = {}
+async def read_file(file_path):
+    async with aiofiles.open(file_path, 'rb') as f:
+        return await f.read()
 
+
+async def write_files_to_zip_task(zip_file, outer_folder, file_list, result_dict, lock):
+    speaker_files = {}
     # 分类 speaker
     for file_path, file_name in file_list:
         index = extract_index_from_filename(file_name)
@@ -284,17 +283,12 @@ async def write_files_to_zip(
                 )
                 new_filename = f"{safe_text}.mp3"
 
-            async with aiofiles.open(file_path, 'rb') as f:
-                content = await f.read()
+            content = await read_file(file_path)
+            async with lock:
                 zip_file.writestr(f"{speaker_folder}/{new_filename}", content)
 
 
-async def process_download_task(
-        download_task_id: str,
-        task_id: str,
-        indices: list[str] or None,
-        download_type: str
-):
+async def process_download_task(download_task_id: str, task_id: str, indices: list[str] or None, download_type: str):
     print("进入下载异步任务")
     try:
         with get_db() as conn_task:
@@ -316,35 +310,33 @@ async def process_download_task(
             db.commit()
 
         zip_buffer = BytesIO()
+        lock = asyncio.Lock()
         with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
-            # 公共变量
             result_dict, file_list = get_task_result_dict_and_files(task_id, segments_dir)
+            tasks = []
 
             if download_type == "bulk":
                 outer_folder = f"{task_id}_bulk_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                # 过滤出 target_indices 对应的文件
                 target_indices = indices or []
                 filtered_file_list = [
                     (fp, fn) for fp, fn in file_list
                     if extract_index_from_filename(fn) in target_indices
                 ]
-                await write_files_to_zip(zip_file, outer_folder, filtered_file_list, result_dict, task_id)
+                tasks.append(write_files_to_zip_task(zip_file, outer_folder, filtered_file_list, result_dict, lock))
 
             elif download_type == "all":
                 outer_folder = f"{task_id}_all_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                tasks.append(write_files_to_zip_task(zip_file, outer_folder, file_list, result_dict, lock))
 
-                # 使用所有文件
-                await write_files_to_zip(zip_file, outer_folder, file_list, result_dict, task_id)
+            await asyncio.gather(*tasks)
 
         zip_buffer.seek(0)
 
-        # 保存压缩包到本地
         download_filename = f"{outer_folder}.zip"
         download_path = os.path.join(DOWNLOAD_DIR, download_filename)
         async with aiofiles.open(download_path, 'wb') as f:
             await f.write(zip_buffer.read())
 
-        # 更新数据库状态
         with get_db() as db:
             download_task = db.query(AIDownloadTask).filter(AIDownloadTask.task_id == download_task_id).first()
             if not download_task:
@@ -357,7 +349,7 @@ async def process_download_task(
             download_task.download_path = download_path
             download_task.updated_at = datetime.now()
             db.commit()
-
+        print(f"task_id:{task_id},download_task_id:{download_task_id}执行完毕")
     except Exception as e:
         print(f"处理下载任务时发生错误: {e}")
         with get_db() as db:
@@ -500,9 +492,9 @@ class AudioService:
         result = self.transcribe_para_former_model(
             input=file_path,
             batch_size_token=4000,
-            batch_size_token_threshold_s=60,
-            max_single_segment_time=20000,  # 最大允许识别 20 秒的语音段
-            vad_speech_noise_ratio=0.5,
+            batch_size_token_threshold_s=30,
+            # max_single_segment_time=20000,
+            # vad_speech_noise_ratio=0.5,
             hotword=",".join(hotword_list),
             vad=True,
             punc=True,
