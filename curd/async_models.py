@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy import Column, String, Integer, Text, DateTime, Float, ForeignKey, create_engine
 
 from sqlalchemy import create_engine
-
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
 from config import MysqlConfig
@@ -56,9 +56,9 @@ class AIDownloadTask(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
 
-# 初始化数据库连接和会话
-def init_db():
-    # 正式站数据库配置
+def init_db_sync():
+    """同步数据库引擎"""
+
     DB_CONFIG = {
         "host": MysqlConfig.host,
         "user": MysqlConfig.user,
@@ -68,18 +68,38 @@ def init_db():
         "charset": MysqlConfig.charset
     }
 
-    # 创建数据库连接字符串
-    db_url = f"mysql+pymysql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@" \
-             f"{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}?" \
-             f"charset={DB_CONFIG['charset']}"
+    db_url = f"mysql+pymysql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}?charset={DB_CONFIG['charset']}"
 
-    # 创建数据库引擎
     engine = create_engine(db_url, echo=False)
-
-    # 创建会话类
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-    # 创建数据库表（如果不存在）
     Base.metadata.create_all(bind=engine)
+
+    return SessionLocal
+
+
+def init_db_async():
+    """异步数据库引擎"""
+    DB_CONFIG = {
+        "host": MysqlConfig.host,
+        "user": MysqlConfig.user,
+        "password": MysqlConfig.password,
+        "database": MysqlConfig.database,
+        "port": MysqlConfig.port,
+        "charset": MysqlConfig.charset
+    }
+
+    db_url = f"mysql+asyncmy://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}?charset={DB_CONFIG['charset']}"
+
+    engine = create_async_engine(
+        db_url,
+        pool_size=20,
+        max_overflow=10,
+        pool_recycle=3600,
+        pool_pre_ping=True,
+        echo=False,
+    )
+
+    SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     return SessionLocal

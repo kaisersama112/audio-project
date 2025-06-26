@@ -14,7 +14,12 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from typing import Dict
+
+from fastapi import HTTPException
 from pydub import AudioSegment
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from config import base_url
@@ -25,11 +30,11 @@ import subprocess
 from modelscope.pipelines import pipeline
 from modelscope.utils.constant import Tasks
 
+from curd.async_crud import get_db_async, update_task_status_async, get_task_async
 from curd.models import AITaskResult, AIDownloadTask
 from models.schemas import Segment
 from services.oss_service import oss_service
 
-from curd.crud import get_db, update_task_status, get_task
 import asyncio
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
@@ -52,7 +57,7 @@ def convert_to_wav(input_path: str, output_path: str):
         raise RuntimeError(f"格式转换失败: {str(e)}")
 
 
-def update_status(task_id, status: str, message: str, progress: int, complete_time=None):
+async def update_status(task_id, status: str, message: str, progress: int, complete_time=None):
     """
     更新任务状态
     :param task_id: 任务ID
@@ -62,16 +67,16 @@ def update_status(task_id, status: str, message: str, progress: int, complete_ti
     :param complete_time: 创建时间
     :return: None
     """
-    with get_db() as db:
+    async with get_db_async() as db:
         if complete_time:
-            update_task_status(db, {
+            return await update_task_status_async(db, {
                 "task_id": task_id,
                 "status": status,
                 "message": message,
                 "progress": progress,
                 "complete_time": complete_time
             })
-        update_task_status(db, {
+        return await update_task_status_async(db, {
             "task_id": task_id,
             "status": status,
             "message": message,
@@ -109,10 +114,10 @@ def merge_progress_callback(task_id, progress, message):
 async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float, separate):
     task_dir = os.path.join(TEMP_DIR, task_id)
     start_time = time.time()  # 开始计时
-    update_status(task_id, "processing", "开始处理音频文件", 0)
+    await update_status(task_id, "processing", "开始处理音频文件", 0)
     stage_start_time = time.time()
     if original_ext.lower() != '.wav':
-        update_status(task_id, "processing", "正在转换音频格式", 10)
+        await update_status(task_id, "processing", "正在转换音频格式", 10)
         wav_path = os.path.join(task_dir, "audio.wav")
         await asyncio.to_thread(convert_to_wav, original_path, wav_path)
         print(f"Task {task_id} - 音频格式转换耗时: {time.time() - stage_start_time:.2f}秒")
@@ -121,10 +126,10 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         processing_path = wav_path
     else:
         processing_path = original_path
-        update_status(task_id, "processing", "音频格式无需转换", 10)
+        await update_status(task_id, "processing", "音频格式无需转换", 10)
     print(f"Task {task_id} - 音频格式处理耗时: {time.time() - stage_start_time:.2f}秒")
     try:
-        update_status(task_id, "processing", "开始语音识别", 20)
+        await update_status(task_id, "processing", "开始语音识别", 20)
         stage_start_time = time.time()
 
         # 使用锁确保 transcribe_para_former 是串行调用
@@ -140,7 +145,7 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
 
         # 发音人合并
-        update_status(task_id, "processing", "合并发音人信息", 30)
+        await update_status(task_id, "processing", "合并发音人信息", 30)
         stage_start_time = time.time()
 
         raw_segments = result[0]["sentence_info"]
@@ -153,7 +158,7 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         )
         print(f"Task {task_id} - 合并发音人信息耗时: {time.time() - stage_start_time:.2f}秒")
 
-        update_status(task_id, "processing", "格式化识别结果", 60)
+        await update_status(task_id, "processing", "格式化识别结果", 60)
         stage_start_time = time.time()
 
         # 保存所有分片到本地
@@ -167,32 +172,41 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         print(f"Task {task_id} - 分割音频片段耗时: {time.time() - stage_start_time:.2f}秒")
 
         # 结果保存阶段
-        update_status(task_id, "processing", "保存识别结果", 95)
+        await update_status(task_id, "processing", "保存识别结果", 95)
         stage_start_time = time.time()
 
-        with get_db() as db:
-            for idx, segment_path, merged_seg in segments_paths:
-                url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
-                # 创建 AITaskResult 对象并添加到数据库
-                db.add(
-                    AITaskResult(
-                        task_id=task_id,
-                        index=idx,
-                        start=merged_seg.get("start"),
-                        end=merged_seg.get("end"),
-                        text=merged_seg.get("text"),
-                        speaker=str(merged_seg.get("spk")),
-                        url=base_url + url
+        async with get_db_async() as db:
+            try:
+                # 构建要插入的对象列表
+                objects_to_insert = []
+                for idx, segment_path, merged_seg in segments_paths:
+                    url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
+                    objects_to_insert.append(
+                        AITaskResult(
+                            task_id=task_id,
+                            index=idx,
+                            start=merged_seg.get("start"),
+                            end=merged_seg.get("end"),
+                            text=merged_seg.get("text"),
+                            speaker=str(merged_seg.get("spk")),
+                            url=base_url + url
+                        )
                     )
-                )
-            db.commit()
+
+                # 批量添加
+                db.add_all(objects_to_insert)
+                await db.commit()
+
+            except SQLAlchemyError as e:
+                await db.rollback()
+                raise HTTPException(500, detail=f"数据库插入失败: {str(e)}")
         print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
 
-        update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
+        await update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
         print(f"Task {task_id} - 总耗时: {time.time() - start_time:.2f}秒")
     except Exception as e:
-        with get_db() as conn:
-            update_task_status(conn, {
+        async with get_db_async() as conn:
+            await update_task_status_async(conn, {
                 "task_id": task_id,
                 "status": "failed",
                 "message": "处理过程中发生错误",
@@ -226,14 +240,17 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
             print(f"Task {task_id} - 清理文件时发生错误: {str(e)}")
 
 
-def get_task_result_dict_and_files(task_id: str, segments_dir: str):
+async def get_task_result_dict_and_files(task_id: str, segments_dir: str):
     """
     获取 result_dict 和 file_list
     """
-    with get_db() as conn:
-        results = conn.query(AITaskResult).filter(
+    async with get_db_async() as conn:
+        stmt = select(AITaskResult).where(
             AITaskResult.task_id == task_id
-        ).all()
+        )
+        result = await conn.execute(stmt)
+        results = result.scalars().all()
+
         result_dict = {r.index: r for r in results}
 
     file_list = []
@@ -291,8 +308,8 @@ async def write_files_to_zip_task(zip_file, outer_folder, file_list, result_dict
 async def process_download_task(download_task_id: str, task_id: str, indices: list[str] or None, download_type: str):
     print("进入下载异步任务")
     try:
-        with get_db() as conn_task:
-            task = get_task(conn_task, task_id)
+        async with get_db_async() as conn_task:
+            task = await get_task_async(conn_task, task_id)
             if not task:
                 return
 
@@ -301,18 +318,29 @@ async def process_download_task(download_task_id: str, task_id: str, indices: li
         if not os.path.exists(segments_dir):
             return
 
-        with get_db() as db:
-            download_task = db.query(AIDownloadTask).filter(AIDownloadTask.task_id == download_task_id).first()
+        async with get_db_async() as db:
+            # 查询记录
+            stmt = select(AIDownloadTask).where(
+                AIDownloadTask.task_id == download_task_id
+            )
+            result = await db.execute(stmt)
+            download_task = result.scalars().first()
+
             if not download_task:
                 return
+
+            # 更新字段（方式一：直接赋值并提交）
             download_task.status = 'processing'
             download_task.updated_at = datetime.now()
-            db.commit()
+
+            # 提交事务（需要启用 sync 模式 flush，因为 AsyncSession 默认不支持 commit）
+            await db.commit()
+            await db.refresh(download_task)  # 可选：刷新对象以获取最新数据（如自动生成字段）
 
         zip_buffer = BytesIO()
         lock = asyncio.Lock()
         with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zip_file:
-            result_dict, file_list = get_task_result_dict_and_files(task_id, segments_dir)
+            result_dict, file_list = await get_task_result_dict_and_files(task_id, segments_dir)
             tasks = []
 
             if download_type == "bulk":
@@ -337,27 +365,52 @@ async def process_download_task(download_task_id: str, task_id: str, indices: li
         async with aiofiles.open(download_path, 'wb') as f:
             await f.write(zip_buffer.read())
 
-        with get_db() as db:
-            download_task = db.query(AIDownloadTask).filter(AIDownloadTask.task_id == download_task_id).first()
+        async with get_db_async() as db:
+            # 查询任务
+            stmt = select(AIDownloadTask).where(
+                AIDownloadTask.task_id == download_task_id
+            )
+            result = await db.execute(stmt)
+            download_task = result.scalars().first()
+
             if not download_task:
                 return
-            download_task.status = 'completed'
-            download_task.progress = 100
+
+            # 更新字段
             segment_path = base_url + download_path
             url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
+
+            download_task.status = 'completed'
+            download_task.progress = 100
             download_task.file_url = url
             download_task.download_path = download_path
             download_task.updated_at = datetime.now()
-            db.commit()
+
+            # 提交事务（注意：需要 await）
+            await db.commit()
+            await db.refresh(download_task)  # 可选：刷新对象状态
         print(f"task_id:{task_id},download_task_id:{download_task_id}执行完毕")
     except Exception as e:
         print(f"处理下载任务时发生错误: {e}")
-        with get_db() as db:
-            download_task = db.query(AIDownloadTask).filter(AIDownloadTask.task_id == download_task_id).first()
+        try:
+
+            stmt = select(AIDownloadTask).where(
+                AIDownloadTask.task_id == download_task_id
+            )
+            result = await db.execute(stmt)
+            download_task = result.scalars().first()
+
             if download_task:
+                # 更新字段
                 download_task.status = 'failed'
                 download_task.updated_at = datetime.now()
-                db.commit()
+                await db.commit()
+                await db.refresh(download_task)
+
+        except SQLAlchemyError as e:
+            await db.rollback()
+            # 可以记录日志或抛出 HTTP 异常
+            raise
 
 
 def merge_with_ffmpeg(task_dir: str, output_path: str):
@@ -410,18 +463,24 @@ def validate_audio_file(file_path: str):
         raise RuntimeError(error_msg)
 
 
-def load_segments_if_completed(db: Session, task_id: str):
+async def load_segments_if_completed(db: AsyncSession, task_id: str):
     """
-    检查任务是否已完成，如果完成则加载结果
+    异步检查任务是否已完成，如果完成则加载结果
     """
     try:
-        # 使用 SQLAlchemy 的查询方法获取结果
-        results = db.query(AITaskResult).filter(AITaskResult.task_id == task_id).order_by(AITaskResult.index).all()
+        # 构建查询语句
+        stmt = select(AITaskResult).where(
+            AITaskResult.task_id == task_id
+        ).order_by(AITaskResult.index)
 
-        # 将查询结果转换为 Segment 对象列表
+        # 执行查询
+        result = await db.execute(stmt)
+        results = result.scalars().all()
+
+        # 转换为 Segment 对象列表
         segment_list = [Segment(**val.__dict__) for val in results]
         return segment_list
-    except Exception as e:
+    except SQLAlchemyError as e:
         return f"Error loading segments: {str(e)}"
 
 
@@ -660,14 +719,13 @@ class AudioService:
             progress_callback(task_id, 100, "片段合并完成（最后一个片段未达最小时长）")
         return merged
 
-    def _save_merged_segment(self, audio, duration_ms, original_path: str, start: float, end: float,
+    @staticmethod
+    def _save_merged_segment(audio, duration_ms, original_path: str, start: float, end: float,
                              index: int, task_id: str) -> str:
         """保存合并后的长片段（修复变量引用问题）"""
         try:
             if not os.path.exists(original_path):
                 raise FileNotFoundError(f"音频文件不存在: {original_path}")
-            # audio = AudioSegment.from_file(original_path)
-            # duration_ms = len(audio)
             start_ms = int(start)
             end_ms = int(end)
             if start_ms <= 0 or end_ms >= duration_ms:
@@ -709,14 +767,14 @@ class AudioService:
         audio = AudioSegment.from_file(file_path)
         duration_ms = len(audio)
         total_segments = len(merged_segments)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            # with concurrent.futures.ProcessPoolExecutor(max_workers=5) as executor:
+        max_workers = min(10, os.cpu_count() or 4)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
             # 创建任务列表
             futures = []
             for idx, merged_seg in enumerate(merged_segments):
                 future = executor.submit(
-                    self._save_merged_segment,
+                    AudioService._save_merged_segment,
                     audio=audio,
                     duration_ms=duration_ms,
                     original_path=file_path,

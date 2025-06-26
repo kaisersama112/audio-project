@@ -41,6 +41,7 @@ starlette~=0.38.6
 librosa~=0.10.1
 soundfile~=0.13.1
 torchmetrics~=1.7.1
+asyncmy==0.2.10
 aiofiles
 ufile
 common

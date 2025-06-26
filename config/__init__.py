@@ -12,7 +12,7 @@ class BaseConfig:
     model_path = "pre_model/faster_whisper/whisper-large-v3-turbo-ct2"
     TEMP_DIR = "temp_audio_files"
     HOST = "0.0.0.0"
-    PORT = 7005
+    PORT = 7009
     num_workers = os.cpu_count()
     reload = False
     quantize = True
@@ -83,5 +83,5 @@ class UCloudConfig:
     UCloud_file_bucket = "aipublic"
     neiwang = ".internal-cn-wlcb.ufileos.com"
     waiwang = ".cn-wlcb.ufileos.com"
-    UCloud_file_upload_suffix = neiwang
-    UCloud_file_download_suffix = neiwang
+    UCloud_file_upload_suffix = waiwang
+    UCloud_file_download_suffix = waiwang

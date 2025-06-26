@@ -2,7 +2,8 @@ import os
 from fastapi import FastAPI
 from starlette.staticfiles import StaticFiles
 from config import settings, DOWNLOAD_DIR
-from curd.models import init_db
+from curd.async_models import init_db_async
+
 from routers import transcribe
 from fastapi.middleware.cors import CORSMiddleware
 from services.audio_service import audio_service
@@ -25,7 +26,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    init_db()
+    init_db_async()
     audio_service.load_model()
 
 

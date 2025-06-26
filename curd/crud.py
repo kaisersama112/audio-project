@@ -1,12 +1,15 @@
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
-from sqlalchemy.orm import Session
 
 from curd import models
 from curd.models import AITask, AITaskResult
 
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
 
 # 获取数据库会话
+""""""
 @contextmanager
 def get_db():
     SessionLocal = models.init_db()
@@ -15,6 +18,7 @@ def get_db():
         yield db
     finally:
         db.close()
+
 
 
 # 创建任务
@@ -66,8 +70,6 @@ def get_task(db: Session, task_id: str):
     return db.query(AITask).filter(AITask.task_id == task_id).first()
 
 
-from sqlalchemy import or_
-
 def get_task_results(db: Session, task_id: str, keyword: str = None, speaker: str = None, page: int = 1,
                      per_page: int = 10):
     """
@@ -118,6 +120,7 @@ def delete_task(db: Session, task_id: str):
     db.query(AITask).filter(AITask.task_id == task_id).delete()
     db.commit()
 
+
 def get_segments_by_indices(db: Session, task_id: str, indices: list[int]):
     """
     根据原始索引列表获取对应的结果片段。
@@ -132,6 +135,7 @@ def get_segments_by_indices(db: Session, task_id: str, indices: list[int]):
         .all()
     )
 
+
 def get_all_segments(db: Session, task_id: str):
     """
     获取某个任务下的所有结果片段。
@@ -142,10 +146,6 @@ def get_all_segments(db: Session, task_id: str):
         .filter(AITaskResult.task_id == task_id)
         .all()
     )
-
-
-from sqlalchemy import or_
-from sqlalchemy.orm import Session
 
 
 def delete_segments_by_keywords(db: Session, task_id: str, keywords: list):
@@ -182,6 +182,7 @@ def delete_segments_by_keywords(db: Session, task_id: str, keywords: list):
     db.commit()
 
     return deleted_indices
+
 
 def delete_segments_by_indices(db: Session, task_id: str, indices: list):
     """

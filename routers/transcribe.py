@@ -16,11 +16,15 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Form
 
 import shutil
 
+from sqlalchemy import select
 from starlette.responses import FileResponse
 
 from config import TEMP_DIR
-from curd.crud import get_db, create_task, get_task, get_task_results, get_segments_by_indices, get_all_segments, \
-    delete_segments_by_keywords, delete_segments_by_indices
+from curd.async_crud import get_db_async, get_task_async, create_task_async, get_task_results_async, \
+    get_segments_by_indices_async, get_all_segments_async, delete_segments_by_indices_async, \
+    delete_segments_by_keywords_async
+# from curd.crud import get_db, create_task, get_task, get_task_results, get_segments_by_indices, get_all_segments, \
+#     delete_segments_by_keywords, delete_segments_by_indices
 from curd.models import AITaskResult, AIDownloadTask
 from models.schemas import TaskStatusResponse, PaginatedSegments, Segment
 from services.audio_service import format_task_merged_filename, load_segments_if_completed, process_audio_task, \
@@ -42,8 +46,8 @@ async def start_audio_processing(
     print("task_id:", task_id)
     downloader = UCloudFileDownloader()
     task_dir = os.path.join(TEMP_DIR, task_id)
-    with get_db() as db:
-        existing_task = get_task(db, task_id)  # 使用之前定义的 get_task 函数
+    async with get_db_async() as db:
+        existing_task = await get_task_async(db, task_id)  # 使用之前定义的 get_task 函数
         if existing_task:
             shutil.rmtree(task_dir, ignore_errors=True)
             raise HTTPException(status_code=409, detail="任务已存在")
@@ -77,7 +81,7 @@ async def start_audio_processing(
             raise HTTPException(500, f"下载音频文件失败: {str(e)}")
         try:
             # 创建任务记录
-            create_task(db, {
+            await create_task_async(db, {
                 "task_id": task_id,
                 "status": "pending",
                 "message": "音频文件已下载，等待处理",
@@ -104,14 +108,14 @@ async def start_audio_processing(
 
 @router.get("/tasks/{task_id}/status", response_model=TaskStatusResponse, summary="获取任务状态")
 async def get_task_status(task_id: str):
-    with get_db() as conn:
-        task = get_task(conn, task_id)
+    async with get_db_async() as conn:
+        task = await get_task_async(conn, task_id)
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
 
         segments = None
         if task.status == "completed":  # 使用属性访问
-            segments = load_segments_if_completed(conn, task_id)
+            segments = await load_segments_if_completed(conn, task_id)
 
         print(segments)
         return TaskStatusResponse(
@@ -150,14 +154,14 @@ async def get_task_segments(
     """获取任务分段数据（增强版）"""
 
     # 1. 验证任务状态
-    with get_db() as conn:
-        task = get_task(conn, task_id)
+    async with get_db_async() as conn:
+        task = await get_task_async(conn, task_id)
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
         if task.status != "completed":
             raise HTTPException(status_code=425, detail="任务尚未完成")
         # 查询结果数据
-        results = get_task_results(conn, task_id, keyword, speaker, page, per_page)
+        results = await get_task_results_async(conn, task_id, keyword, speaker, page, per_page)
         # 将 AITaskResult 对象转换为 Segment 对象
     segment_items = []
     for result in results["items"]:
@@ -187,8 +191,8 @@ async def get_task_segments(
     200: {"content": {"audio/mpeg": {}}, "description": "返回MP3音频片段"}},
             summary="单音频下载")
 async def download_single_segment(task_id: str, segment_index: int):
-    with get_db() as conn_task:
-        task = get_task(conn_task, task_id)
+    async with get_db_async() as conn_task:
+        task = await get_task_async(conn_task, task_id)
         if not task:
             raise HTTPException(404, "任务不存在")
     # 本地文件下载逻辑
@@ -201,11 +205,15 @@ async def download_single_segment(task_id: str, segment_index: int):
     if not os.path.exists(file_path):
         raise HTTPException(404, "音频文件不存在")
     # 从数据库获取当前片段的文本、开始时间和结束时间信息
-    with get_db() as conn_status:
-        result = conn_status.query(AITaskResult).filter(
+
+    async with get_db_async() as conn_status:
+        stmt = select(AITaskResult).where(
             AITaskResult.task_id == task_id,
             AITaskResult.index == segment_index
-        ).first()
+        ).limit(1)
+
+        result = (await conn_status.execute(stmt)).scalars().first()
+
         if not result:
             raise HTTPException(404, "片段信息不存在")
         text = result.text
@@ -229,37 +237,35 @@ async def download_bulk_segments(
         indices: str = Query(..., description="逗号分隔的原始索引列表"),
         background_tasks: BackgroundTasks = None
 ):
-    with get_db() as conn:
-        task = get_task(conn, task_id)
-        if not task:
-            raise HTTPException(404, "任务不存在")
+    async with get_db_async() as session:
+        async with session.begin():  # 开启事务
+            task = await get_task_async(session, task_id)
+            if not task:
+                raise HTTPException(404, "任务不存在")
 
-        # 解析索引
-        try:
-            index_list = [int(i.strip()) for i in indices.split(",") if i.strip()]
-        except ValueError:
-            raise HTTPException(400, "索引格式错误")
+            try:
+                # index_list = [int(i.strip()) for i in indices.split(",") if i.strip()]
+                index_list = re.split(r'[;,；，、]', indices)
 
-        # 查询对应的数据是否存在
-        segments = get_segments_by_indices(conn, task_id, index_list)  # 你需要实现这个函数
-        if not len(segments):
-            raise HTTPException(404, "指定的音频片段不存在")
+            except ValueError:
+                raise HTTPException(400, "索引格式错误")
 
-        # 生成唯一的下载任务ID
-        download_task_id = str(uuid4())
+            segments = await get_segments_by_indices_async(session, task_id, index_list)
+            if not segments:
+                raise HTTPException(404, "指定的音频片段不存在")
 
-        # 创建下载任务
-        db_download_task = AIDownloadTask(
-            task_id=download_task_id,
-            original_task_id=task_id,
-            status='processing',
-            progress=0
-        )
-        conn.add(db_download_task)
-        conn.commit()
-        conn.refresh(db_download_task)
+            download_task_id = str(uuid4())
 
-    background_tasks.add_task(process_download_task, download_task_id, task_id, index_list, "bulk")
+            db_download_task = AIDownloadTask(
+                task_id=download_task_id,
+                original_task_id=task_id,
+                status='processing',
+                progress=0
+            )
+            session.add(db_download_task)
+
+        # 背景任务不能放在事务中执行，所以这里离开事务后再添加
+        background_tasks.add_task(process_download_task, download_task_id, task_id, index_list, "bulk")
 
     return {
         "download_task_id": download_task_id,
@@ -274,30 +280,27 @@ async def download_all_segments(
         task_id: str,
         background_tasks: BackgroundTasks = None
 ):
-    with get_db() as conn:
-        task = get_task(conn, task_id)
-        if not task:
-            raise HTTPException(404, "任务不存在")
+    async with get_db_async() as session:
+        async with session.begin():
+            task = await get_task_async(session, task_id)
+            if not task:
+                raise HTTPException(404, "任务不存在")
 
-        # 检查是否有可下载的 segment
-        all_segments = get_all_segments(conn, task_id)  # 你需要实现这个函数
-        if not all_segments:
-            raise HTTPException(404, "没有可下载的音频片段")
+            all_segments = await get_all_segments_async(session, task_id)
+            if not all_segments:
+                raise HTTPException(404, "没有可下载的音频片段")
 
-        # 生成唯一的下载任务ID
-        download_task_id = str(uuid4())
+            download_task_id = str(uuid4())
 
-        # 创建下载任务
-        db_download_task = AIDownloadTask(
-            task_id=download_task_id,
-            original_task_id=task_id,
-            status='processing',
-            progress=0
-        )
-        conn.add(db_download_task)
-        conn.commit()
-        conn.refresh(db_download_task)
-    background_tasks.add_task(process_download_task, download_task_id, task_id, None, "all")
+            db_download_task = AIDownloadTask(
+                task_id=download_task_id,
+                original_task_id=task_id,
+                status='processing',
+                progress=0
+            )
+            session.add(db_download_task)
+
+        background_tasks.add_task(process_download_task, download_task_id, task_id, None, "all")
 
     return {
         "download_task_id": download_task_id,
@@ -307,8 +310,11 @@ async def download_all_segments(
 
 @router.get("/download/status/{download_task_id}", summary="查询下载任务状态")
 async def get_download_task_status(download_task_id: str):
-    with get_db() as db:
-        download_task = db.query(AIDownloadTask).filter(AIDownloadTask.task_id == download_task_id).first()
+    async with get_db_async() as db:
+        stmt = select(AIDownloadTask).where(AIDownloadTask.task_id == download_task_id)
+        result = await db.execute(stmt)
+        download_task = result.scalars().first()
+
         if not download_task:
             return {"status": "not_found"}
 
@@ -327,8 +333,10 @@ async def delete_segments(
 ):
     """删除指定任务的多个分段数据"""
     try:
+        segment_indices = re.split(r'[;,；，、]', indices)
+
         # 将传入的字符串转换为整数列表
-        segment_indices = [int(idx) for idx in indices.split(',') if idx.strip()]
+        # segment_indices = [int(idx) for idx in indices.split(',') if idx.strip()]
     except ValueError:
         raise HTTPException(400, detail="索引格式错误，请使用逗号分隔的整数")
 
@@ -338,9 +346,9 @@ async def delete_segments(
     if not os.path.exists(segments_dir):
         raise HTTPException(404, detail="音频文件夹不存在")
 
-    with get_db() as conn:
+    async with get_db_async() as conn:
         # 调用通用删除函数
-        deleted_indices = delete_segments_by_indices(conn, task_id, segment_indices)
+        deleted_indices = await delete_segments_by_indices_async(conn, task_id, segment_indices)
         if not deleted_indices:
             raise HTTPException(404, detail=f"任务 {task_id} 下指定的分段不存在")
 
@@ -362,22 +370,22 @@ async def delete_segments_keyword(
         keyword: str = Query(..., description="关键词，可用逗号、分号分隔多个")
 ):
     """删除指定任务中包含任意关键词的分段数据"""
-    with get_db() as conn:
+    async with get_db_async() as conn:
         # 检查任务是否存在及状态
-        task = get_task(conn, task_id)
+        task = await get_task_async(conn, task_id)
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
         if task.status != "completed":  # 使用属性访问
             raise HTTPException(status_code=425, detail="任务尚未完成")
 
         # 解析关键词
-        keywords = re.split(r'[;,；，]', keyword)
+        keywords = re.split(r'[;,；，、]', keyword)
         keywords = [f"%{k.strip()}%" for k in keywords if k.strip()]
         if not keywords:
             raise HTTPException(status_code=400, detail="关键词不能为空")
 
         # 调用数据库操作函数，获取被删除的分段索引
-        deleted_indices = delete_segments_by_keywords(conn, task_id, keywords)
+        deleted_indices = await delete_segments_by_keywords_async(conn, task_id, keywords)
         if not deleted_indices:
             raise HTTPException(status_code=404, detail="未找到匹配的分段")
 
@@ -410,11 +418,16 @@ async def get_speakers(
 ):
     """获取指定任务的所有发音人列表"""
     try:
-        with get_db() as conn:
-            # 使用 ORM 查询
-            speakers = conn.query(AITaskResult.speaker).filter(
+        async with get_db_async() as conn:
+            # 使用新的异步查询方式
+            stmt = select(AITaskResult.speaker).where(
                 AITaskResult.task_id == task_id
-            ).distinct().all()
-            return [speaker[0] for speaker in speakers]
+            ).distinct()
+
+            result = await conn.execute(stmt)
+            speakers = result.scalars().all()
+
+            return list(speakers)
+
     except Exception as e:
         raise HTTPException(500, detail=f"获取发音人列表时出错: {str(e)}")

@@ -48,7 +48,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
 
 # 安装运行时依赖
-RUN apt-get update -qq && \
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
+    apt-get update -qq && \
     apt-get install -y --no-install-recommends \
     python3.10 \
     python3-pip \
