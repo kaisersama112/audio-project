@@ -83,5 +83,5 @@ class UCloudConfig:
     UCloud_file_bucket = "aipublic"
     neiwang = ".internal-cn-wlcb.ufileos.com"
     waiwang = ".cn-wlcb.ufileos.com"
-    UCloud_file_upload_suffix = waiwang
-    UCloud_file_download_suffix = waiwang
+    UCloud_file_upload_suffix = neiwang
+    UCloud_file_download_suffix = neiwang

@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from typing import Dict
 
+import torchaudio
 from fastapi import HTTPException
 from pydub import AudioSegment
 from sqlalchemy import select
@@ -128,116 +129,116 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         processing_path = original_path
         await update_status(task_id, "processing", "音频格式无需转换", 10)
     print(f"Task {task_id} - 音频格式处理耗时: {time.time() - stage_start_time:.2f}秒")
-    try:
-        await update_status(task_id, "processing", "开始语音识别", 20)
-        stage_start_time = time.time()
+    # try:
+    await update_status(task_id, "processing", "开始语音识别", 20)
+    stage_start_time = time.time()
 
-        # 使用锁确保 transcribe_para_former 是串行调用
-        async with TRANSCRIBE_LOCK:
-            result = await asyncio.to_thread(
-                audio_service.transcribe_para_former,
-                processing_path,
-                separate
-            )
-            # 添加结果检查
-            if not isinstance(result, list) or len(result) == 0 or not isinstance(result[0], dict):
-                raise ValueError(f"Invalid transcription result: {result}")
-        print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
-
-        # 发音人合并
-        await update_status(task_id, "processing", "合并发音人信息", 30)
-        stage_start_time = time.time()
-
-        raw_segments = result[0]["sentence_info"]
-        merged_segments = await asyncio.to_thread(
-            audio_service.merge_segments,
-            task_id,
-            raw_segments,
-            min_chunk_duration,
-            merge_progress_callback
-        )
-        print(f"Task {task_id} - 合并发音人信息耗时: {time.time() - stage_start_time:.2f}秒")
-
-        await update_status(task_id, "processing", "格式化识别结果", 60)
-        stage_start_time = time.time()
-
-        # 保存所有分片到本地
-        segments_paths = await asyncio.to_thread(
-            audio_service.split_segments,
-            merged_segments,
+    # 使用锁确保 transcribe_para_former 是串行调用
+    async with TRANSCRIBE_LOCK:
+        result = await asyncio.to_thread(
+            audio_service.transcribe_para_former,
             processing_path,
-            task_id,
-            split_progress_callback
+            separate
         )
-        print(f"Task {task_id} - 分割音频片段耗时: {time.time() - stage_start_time:.2f}秒")
+        # 添加结果检查
+        if not isinstance(result, list) or len(result) == 0 or not isinstance(result[0], dict):
+            raise ValueError(f"Invalid transcription result: {result}")
+    print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
 
-        # 结果保存阶段
-        await update_status(task_id, "processing", "保存识别结果", 95)
-        stage_start_time = time.time()
+    # 发音人合并
+    await update_status(task_id, "processing", "合并发音人信息", 30)
+    stage_start_time = time.time()
 
-        async with get_db_async() as db:
-            try:
-                # 构建要插入的对象列表
-                objects_to_insert = []
-                for idx, segment_path, merged_seg in segments_paths:
-                    url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
-                    objects_to_insert.append(
-                        AITaskResult(
-                            task_id=task_id,
-                            index=idx,
-                            start=merged_seg.get("start"),
-                            end=merged_seg.get("end"),
-                            text=merged_seg.get("text"),
-                            speaker=str(merged_seg.get("spk")),
-                            url=base_url + url
-                        )
-                    )
+    raw_segments = result[0]["sentence_info"]
+    merged_segments = await asyncio.to_thread(
+        audio_service.merge_segments,
+        task_id,
+        raw_segments,
+        min_chunk_duration,
+        merge_progress_callback
+    )
+    print(f"Task {task_id} - 合并发音人信息耗时: {time.time() - stage_start_time:.2f}秒")
 
-                # 批量添加
-                db.add_all(objects_to_insert)
-                await db.commit()
+    await update_status(task_id, "processing", "格式化识别结果", 60)
+    stage_start_time = time.time()
 
-            except SQLAlchemyError as e:
-                await db.rollback()
-                raise HTTPException(500, detail=f"数据库插入失败: {str(e)}")
-        print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
+    # 保存所有分片到本地
+    segments_paths = await asyncio.to_thread(
+        audio_service.split_segments,
+        merged_segments,
+        processing_path,
+        task_id,
+        split_progress_callback
+    )
+    print(f"Task {task_id} - 分割音频片段耗时: {time.time() - stage_start_time:.2f}秒")
 
-        await update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
-        print(f"Task {task_id} - 总耗时: {time.time() - start_time:.2f}秒")
-    except Exception as e:
-        async with get_db_async() as conn:
-            await update_task_status_async(conn, {
-                "task_id": task_id,
-                "status": "failed",
-                "message": "处理过程中发生错误",
-                "progress": 100,
-                "error": str(e),
-                "complete_time": datetime.now().isoformat()
-            })
-            print(f"Task {task_id} - 处理失败，耗时: {time.time() - start_time:.2f}秒")
-    finally:
-        # 清理原始数据，只保留切片数据
+    # 结果保存阶段
+    await update_status(task_id, "processing", "保存识别结果", 95)
+    stage_start_time = time.time()
+
+    async with get_db_async() as db:
         try:
-            # 清理原始音频文件（如果存在）
-            if os.path.exists(original_path):
-                os.remove(original_path)
-                print(f"Task {task_id} - 已清理原始音频文件: {original_path}")
-            # 清理处理后的音频文件（如果存在）
-            if os.path.exists(processing_path) and processing_path != original_path:
-                os.remove(processing_path)
-                print(f"Task {task_id} - 已清理处理后的音频文件: {processing_path}")
-            # 清理任务目录中的中间文件
-            for chunk in glob.glob(os.path.join(task_dir, "chunk_*.wav")):
-                os.remove(chunk)
-                print(f"Task {task_id} - 已清理中间文件: {chunk}")
+            # 构建要插入的对象列表
+            objects_to_insert = []
+            for idx, segment_path, merged_seg in segments_paths:
+                url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
+                objects_to_insert.append(
+                    AITaskResult(
+                        task_id=task_id,
+                        index=idx,
+                        start=merged_seg.get("start"),
+                        end=merged_seg.get("end"),
+                        text=merged_seg.get("text"),
+                        speaker=str(merged_seg.get("spk")),
+                        url=base_url + url
+                    )
+                )
 
-            # 如果任务目录为空，则删除目录
-            if os.path.exists(task_dir) and not os.listdir(task_dir):
-                os.rmdir(task_dir)
-                print(f"Task {task_id} - 已删除空任务目录: {task_dir}")
+            # 批量添加
+            db.add_all(objects_to_insert)
+            await db.commit()
 
-        except Exception as e:
-            print(f"Task {task_id} - 清理文件时发生错误: {str(e)}")
+        except SQLAlchemyError as e:
+            await db.rollback()
+            raise HTTPException(500, detail=f"数据库插入失败: {str(e)}")
+    print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
+
+    await update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
+    print(f"Task {task_id} - 总耗时: {time.time() - start_time:.2f}秒")
+    # except Exception as e:
+    #     async with get_db_async() as conn:
+    #         await update_task_status_async(conn, {
+    #             "task_id": task_id,
+    #             "status": "failed",
+    #             "message": "处理过程中发生错误",
+    #             "progress": 100,
+    #             "error": str(e),
+    #             "complete_time": datetime.now().isoformat()
+    #         })
+    #         print(f"Task {task_id} - 处理失败，耗时: {time.time() - start_time:.2f}秒")
+    # finally:
+    #     # 清理原始数据，只保留切片数据
+    #     try:
+    #         # 清理原始音频文件（如果存在）
+    #         if os.path.exists(original_path):
+    #             os.remove(original_path)
+    #             print(f"Task {task_id} - 已清理原始音频文件: {original_path}")
+    #         # 清理处理后的音频文件（如果存在）
+    #         if os.path.exists(processing_path) and processing_path != original_path:
+    #             os.remove(processing_path)
+    #             print(f"Task {task_id} - 已清理处理后的音频文件: {processing_path}")
+    #         # 清理任务目录中的中间文件
+    #         for chunk in glob.glob(os.path.join(task_dir, "chunk_*.wav")):
+    #             os.remove(chunk)
+    #             print(f"Task {task_id} - 已清理中间文件: {chunk}")
+    #
+    #         # 如果任务目录为空，则删除目录
+    #         if os.path.exists(task_dir) and not os.listdir(task_dir):
+    #             os.rmdir(task_dir)
+    #             print(f"Task {task_id} - 已删除空任务目录: {task_dir}")
+    #
+    #     except Exception as e:
+    #         print(f"Task {task_id} - 清理文件时发生错误: {str(e)}")
 
 
 async def get_task_result_dict_and_files(task_id: str, segments_dir: str):
@@ -533,23 +534,135 @@ class AudioService:
 
         print("Models loaded successfully")
 
-    def transcribe_para_former(self, file_path: str, separate: bool):
+    # def transcribe_para_former(self, file_path: str, separate: bool):
+    #     """
+    #     根据 separate 参数决定是否先进行人声分离再进行语音识别。
+    #
+    #     :param file_path: 原始音频文件路径
+    #     :param separate: 是否启用人声与背景音分离
+    #     :return: 识别结果
+    #     """
+    #
+    #     if separate:
+    #         self.ans_model(
+    #             file_path,
+    #             output_path=file_path
+    #         )
+    #     # 不做分离，直接识别原始音频
+    #     result = self.transcribe_para_former_model(
+    #         input=file_path,
+    #         batch_size_token=4000,
+    #         batch_size_token_threshold_s=30,
+    #         # max_single_segment_time=20000,
+    #         # vad_speech_noise_ratio=0.5,
+    #         hotword=",".join(hotword_list),
+    #         vad=True,
+    #         punc=True,
+    #         spk=True
+    #     )
+    #     print(result)
+    #     return result
+    def transcribe_para_former(self, file_path: str, separate: bool, max_segment_duration: int = 600000*3):
         """
         根据 separate 参数决定是否先进行人声分离再进行语音识别。
 
         :param file_path: 原始音频文件路径
         :param separate: 是否启用人声与背景音分离
+        :param max_segment_duration: 单次处理的最大时长（毫秒） 30 MINUS
         :return: 识别结果
         """
-
         if separate:
             self.ans_model(
                 file_path,
                 output_path=file_path
             )
-        # 不做分离，直接识别原始音频
-        result = self.transcribe_para_former_model(
-            input=file_path,
+        audio_info = self.get_audio_info(file_path)
+        audio_duration = audio_info['duration']
+        if audio_duration > max_segment_duration:
+            num_segments = int(audio_duration // max_segment_duration) + 1
+            results = []
+            for i in range(num_segments):
+                start_time = i * max_segment_duration
+                end_time = min((i + 1) * max_segment_duration, audio_duration)
+                segment = self.cut_audio_to_memory(file_path, start_time, end_time)
+                segment_result = self.transcribe_segment(
+                    segment,
+                    max_segment_duration * i,
+                    file_path
+                )
+                results.append(segment_result)
+
+            final_result = self.merge_results(results)
+            return final_result
+        else:
+            # 不做分离，直接识别原始音频
+            result = self.transcribe_para_former_model(
+                input=file_path,
+                batch_size_token=4000,
+                batch_size_token_threshold_s=30,
+                vad=True,
+                punc=True,
+                spk=True
+            )
+            print(result)
+            return result
+
+    def get_audio_info(self, file_path):
+        """
+        获取音频文件信息（时长等）
+
+        :param file_path: 音频文件路径
+        :return: 音频信息字典
+        """
+        # 使用 torchaudio 获取音频信息
+        audio_info = torchaudio.info(file_path)
+        sample_rate = audio_info.sample_rate
+        num_frames = audio_info.num_frames
+        channels = audio_info.num_channels
+
+        # 计算音频时长（毫秒）
+        duration_ms = (num_frames / sample_rate) * 1000
+
+        return {
+            'duration': duration_ms,
+            'sample_rate': sample_rate,
+            'channels': channels,
+            'num_frames': num_frames
+        }
+
+    def cut_audio_to_memory(self, input_file, start_time, end_time):
+        """
+        截取音频片段并保存到内存
+
+        :param input_file: 输入音频文件路径
+        :param start_time: 开始时间（毫秒）
+        :param end_time: 结束时间（毫秒）
+        :return: 截取后的音频片段对象
+        """
+        # 使用 pydub 加载音频文件
+        audio = AudioSegment.from_file(input_file)
+
+        # 截取音频片段
+        segment = audio[start_time:end_time]
+
+        return segment
+
+    def transcribe_segment(self, segment, segment_start_time, file_path):
+        """
+        对音频片段进行识别
+
+        :param segment: 音频片段对象
+        :param segment_start_time: 当前片段的起始时间（毫秒）
+        :param file_path: 原始音频文件路径
+        :return: 识别结果
+        """
+        # 将音频片段保存到临时文件
+        temp_file = f"{file_path}_temp_segment.wav"
+        segment.export(temp_file, format='wav')
+
+        # 对片段进行识别
+        segment_result = self.transcribe_para_former_model(
+            input=temp_file,
             batch_size_token=4000,
             batch_size_token_threshold_s=30,
             # max_single_segment_time=20000,
@@ -559,7 +672,44 @@ class AudioService:
             punc=True,
             spk=True
         )
-        return result
+
+        return segment_result, segment_start_time
+
+    def merge_results(self, results):
+        """
+        合并多个片段的结果，调整时间戳
+
+        :param results: 所有片段的识别结果及其起始时间
+        :param total_duration: 原始音频的总时长（毫秒）
+        :return: 合并后的识别结果
+        """
+        merged_result = {
+            'sentence_info': []
+        }
+
+        # 遍历每个片段的结果
+        for result, segment_start_time in results:
+            # 遍历片段中的每个句子
+            for sentence in result[0]['sentence_info']:
+                # 调整时间戳
+                new_sentence = {
+                    'end': segment_start_time + sentence['end'],
+                    'spk': sentence['spk'],
+                    'start': segment_start_time + sentence['start'],
+                    'text': sentence['text'],
+                    'timestamp': []
+                }
+
+                # 调整时间戳数组
+                for timestamp in sentence['timestamp']:
+                    new_sentence['timestamp'].append(
+                        [segment_start_time + timestamp[0],
+                         segment_start_time + timestamp[1]]
+                    )
+
+                merged_result['sentence_info'].append(new_sentence)
+
+        return [merged_result]
 
     def _upload_single_segment(self, segment_path: str, task_id: str, seg: dict, idx: int) -> Dict:
         """单个片段的上传任务"""

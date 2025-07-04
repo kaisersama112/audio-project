@@ -56,27 +56,6 @@ class AIDownloadTask(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
 
-def init_db_sync():
-    """同步数据库引擎"""
-
-    DB_CONFIG = {
-        "host": MysqlConfig.host,
-        "user": MysqlConfig.user,
-        "password": MysqlConfig.password,
-        "database": MysqlConfig.database,
-        "port": MysqlConfig.port,
-        "charset": MysqlConfig.charset
-    }
-
-    db_url = f"mysql+pymysql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}?charset={DB_CONFIG['charset']}"
-
-    engine = create_engine(db_url, echo=False)
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-    Base.metadata.create_all(bind=engine)
-
-    return SessionLocal
-
 
 def init_db_async():
     """异步数据库引擎"""

@@ -117,12 +117,35 @@ class UCloudFileDownloader:
             print(f"下载文件时发生错误: {str(e)}")
             return False
 
+    def upload_file(self, put_key, file_path):
+        """
+        上传文件到UCloud
+        """
+        try:
+            # 上传文件
+            _, resp = self.file_manager.putfile(
+                self.bucket,
+                put_key,
+                file_path
+            )
+            if resp.status_code == 200:
+                print(f"文件上传成功: {put_key} -> {file_path}->{resp.etag}")
+                print(resp.etag)
+                return resp.etag
+            else:
+                print(f"文件上传失败，状态码: {resp.status_code}")
+                return False
+        except Exception as e:
+            print(f"上传文件时发生错误: {str(e)}")
+            return False
+
+#
 # if __name__ == "__main__":
 #     # 创建文件下载器
 #     downloader = UCloudFileDownloader()
 #     # 文件信息
-#     put_key = "5月21日.MP3"  # 存储在UCloud中的文件名称
-#     save_file = "5月21日.MP3"  # 本地保存的文件名称
+#     put_key = "7/merged_segments/merged_7_00000.mp3"  # 存储在UCloud中的文件名称
+#     save_file = "merged_7_00000.mp3"  # 本地保存的文件名称
 #
 #     # 执行下载
-#     download_result = downloader.download_file(put_key, save_file)
+#     download_result = downloader.upload_file(put_key, save_file)
