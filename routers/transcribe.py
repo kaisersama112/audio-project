@@ -28,7 +28,7 @@ from curd.async_crud import get_db_async, get_task_async, create_task_async, get
 from curd.models import AITaskResult, AIDownloadTask
 from models.schemas import TaskStatusResponse, PaginatedSegments, Segment
 from services.audio_service import format_task_merged_filename, load_segments_if_completed, process_audio_task, \
-    process_download_task
+    process_download_task, task_queue_manager
 from utils.ucloud_u3d import UCloudFileDownloader
 
 router = APIRouter(tags=["音频切块"])
@@ -65,7 +65,6 @@ async def start_audio_processing(
             audio_filename_lower = audio_filename.lower()
             if not audio_filename_lower.endswith(('.wav', '.mp3')):
                 raise HTTPException(400, "不支持的音频格式，仅支持 .wav 或 .mp3")
-
             download_path = os.path.join(task_dir, audio_filename)
             print(f"下载路径: {download_path}")
             # 使用UCloud下载器下载文件
@@ -92,8 +91,9 @@ async def start_audio_processing(
             })
             db.commit()
             # 添加后台任务进行音频处理
-            background_tasks.add_task(process_audio_task, task_id, download_path, audio_filename, min_chunk_duration,
-                                      separate)
+            # background_tasks.add_task(process_audio_task, task_id, download_path, audio_filename, min_chunk_duration,
+            #                           separate)
+            await task_queue_manager.add_task(task_id, download_path, audio_filename, min_chunk_duration, separate)
 
             return {
                 "task_id": task_id,

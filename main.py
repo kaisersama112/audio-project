@@ -1,3 +1,4 @@
+import asyncio
 import os
 from fastapi import FastAPI
 from starlette.staticfiles import StaticFiles
@@ -6,7 +7,7 @@ from curd.async_models import init_db_async
 
 from routers import transcribe
 from fastapi.middleware.cors import CORSMiddleware
-from services.audio_service import audio_service
+from services.audio_service import audio_service, task_queue_manager
 
 app = FastAPI()
 app.include_router(transcribe.router, prefix="/api/v1", tags=["transcribe"])
@@ -27,8 +28,17 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     init_db_async()
+    print("数据库初始化完成")
     audio_service.load_model()
+    print("模型加载完成")
+    asyncio.create_task(task_queue_manager.start())
+    print("任务队列管理器已启动")
 
+# 使用 uvicorn 的 shutdown 事件来清理资源
+@app.on_event("shutdown")
+async def shutdown_event():
+    await task_queue_manager.stop()  # 假设 TaskQueueManager 有 stop 方法
+    print("任务队列管理器已停止")
 
 TEMP_DIR = "temp_audio_files"
 os.makedirs(TEMP_DIR, exist_ok=True)

@@ -6,6 +6,8 @@
 @Date    ：29/4/2025 下午4:51
 """
 import concurrent
+from functools import wraps
+
 import aiofiles
 import zipfile
 from datetime import datetime
@@ -112,6 +114,51 @@ def merge_progress_callback(task_id, progress, message):
     update_status(task_id, "processing", f"合并片段: {message}", 30 + int(progress * 0.3))
 
 
+def retry(max_retries: int, retry_delay: float, exception_types: tuple = (Exception,)):
+    """任务失败重试装饰器"""
+
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except exception_types as e:
+                    print(f"Task {args[0]} - 第 {attempt + 1} 次尝试失败: {str(e)}")
+                    await asyncio.sleep(retry_delay)
+            print(f"Task {args[0]} - 已达到最大重试次数: {max_retries}")
+            raise Exception(f"Task {args[0]} - 已达到最大重试次数: {max_retries}")
+
+        return wrapper
+
+    return decorator
+
+
+def timeout(seconds: int):
+    """任务超时控制装饰器"""
+
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            result = None
+            start_time = time.time()
+            try:
+                result = await asyncio.wait_for(func(*args, **kwargs), timeout=seconds)
+            except asyncio.TimeoutError:
+                print(f"Task {args[0]} - 超过 {seconds} 秒未完成，已中断")
+                await update_status(args[0], "failed", "处理超时", 100)
+                raise
+            finally:
+                print(f"Task {args[0]} - 任务总耗时: {time.time() - start_time:.2f}秒")
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+@retry(max_retries=3, retry_delay=5)
+@timeout(seconds=60 * 30)  # 设置每个音频任务的最大处理时间为30分钟
 async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float, separate):
     task_dir = os.path.join(TEMP_DIR, task_id)
     start_time = time.time()  # 开始计时
@@ -498,6 +545,57 @@ def extract_index_from_filename(filename):
     return None
 
 
+class TaskQueueManager:
+    def __init__(self):
+        self.task_queue = asyncio.Queue()
+        self.max_concurrent_tasks = 5  # 最大并发任务数
+        self.running_tasks = set()
+        self.lock = asyncio.Lock()
+
+    async def add_task(self, task_id: str, original_path: str, original_ext: str, min_chunk_duration: float,
+                       separate: bool):
+        """添加任务到队列"""
+        async with self.lock:
+            self.task_queue.put_nowait((task_id, original_path, original_ext, min_chunk_duration, separate))
+            print(f"Task {task_id} - 已添加到任务队列")
+
+    async def process_task(self):
+        """处理单个任务"""
+        while True:
+            # 直接从队列获取任务，会自动阻塞直到队列中有任务
+            task = await self.task_queue.get()
+            task_id = task[0]
+            async with self.lock:
+                self.running_tasks.add(task_id)
+            try:
+                await process_audio_task(*task)
+            except Exception as e:
+                print(f"Task {task_id} - 处理失败: {str(e)}")
+                # 如果失败，则重新添加到队列（根据业务需求决定是否重新调度失败任务）
+                if isinstance(e, asyncio.TimeoutError):
+                    print(f"Task {task_id} - 超时重试")
+                    await self.add_task(*task)
+            finally:
+                async with self.lock:
+                    self.running_tasks.discard(task_id)
+                self.task_queue.task_done()  # 标记任务完成
+
+    async def start(self):
+        """启动任务队列处理器"""
+        for _ in range(self.max_concurrent_tasks):
+            asyncio.create_task(self.process_task())
+        print("TaskQueueManager - 已启动任务队列处理器")
+
+    async def stop(self):
+        """停止任务队列处理器"""
+        async with self.lock:
+            # 添加特殊任务来停止处理器
+            for _ in range(self.max_concurrent_tasks):
+                self.task_queue.put_nowait(None)
+            await self.task_queue.join()
+            print("TaskQueueManager - 已停止任务队列处理器")
+
+
 class AudioService:
     def __init__(self):
         self.ans_model = None
@@ -534,35 +632,7 @@ class AudioService:
 
         print("Models loaded successfully")
 
-    # def transcribe_para_former(self, file_path: str, separate: bool):
-    #     """
-    #     根据 separate 参数决定是否先进行人声分离再进行语音识别。
-    #
-    #     :param file_path: 原始音频文件路径
-    #     :param separate: 是否启用人声与背景音分离
-    #     :return: 识别结果
-    #     """
-    #
-    #     if separate:
-    #         self.ans_model(
-    #             file_path,
-    #             output_path=file_path
-    #         )
-    #     # 不做分离，直接识别原始音频
-    #     result = self.transcribe_para_former_model(
-    #         input=file_path,
-    #         batch_size_token=4000,
-    #         batch_size_token_threshold_s=30,
-    #         # max_single_segment_time=20000,
-    #         # vad_speech_noise_ratio=0.5,
-    #         hotword=",".join(hotword_list),
-    #         vad=True,
-    #         punc=True,
-    #         spk=True
-    #     )
-    #     print(result)
-    #     return result
-    def transcribe_para_former(self, file_path: str, separate: bool, max_segment_duration: int = 600000*3):
+    def transcribe_para_former(self, file_path: str, separate: bool, max_segment_duration: int = 600000 * 3):
         """
         根据 separate 参数决定是否先进行人声分离再进行语音识别。
 
@@ -989,3 +1059,6 @@ class AudioService:
 
 
 audio_service = AudioService()
+
+task_queue_manager = TaskQueueManager()
+# asyncio.create_task(task_queue_manager.start())
