@@ -15,7 +15,7 @@ import glob
 import re
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
-from typing import Dict
+from typing import Dict, Tuple
 
 import torchaudio
 from fastapi import HTTPException
@@ -114,7 +114,7 @@ def merge_progress_callback(task_id, progress, message):
     update_status(task_id, "processing", f"合并片段: {message}", 30 + int(progress * 0.3))
 
 
-def retry(max_retries: int, retry_delay: float, exception_types: tuple = (Exception,)):
+def retry(max_retries: int, retry_delay: float, exception_types: Tuple[type] = (Exception,), db_update: bool = True):
     """任务失败重试装饰器"""
 
     def decorator(func):
@@ -124,17 +124,45 @@ def retry(max_retries: int, retry_delay: float, exception_types: tuple = (Except
                 try:
                     return await func(*args, **kwargs)
                 except exception_types as e:
-                    print(f"Task {args[0]} - 第 {attempt + 1} 次尝试失败: {str(e)}")
+                    task_id = args[0]
+                    print(f"Task {task_id} - 第 {attempt + 1} 次尝试失败: {str(e)}")
+                    if db_update:
+                        async with get_db_async() as db:
+                            await update_task_status_async(
+                                db,
+                                {
+                                    "task_id": task_id,
+                                    "status": "retrying",
+                                    "message": f"第 {attempt + 1} 次尝试失败，正在重试",
+                                    "progress": 0,
+                                    "error": str(e)
+                                }
+                            )
+
                     await asyncio.sleep(retry_delay)
-            print(f"Task {args[0]} - 已达到最大重试次数: {max_retries}")
-            raise Exception(f"Task {args[0]} - 已达到最大重试次数: {max_retries}")
+            task_id = args[0]
+            print(f"Task {task_id} - 已达到最大重试次数: {max_retries}")
+            if db_update:
+                async with get_db_async() as db:
+                    await update_task_status_async(
+                        db,
+                        {
+                            "task_id": task_id,
+                            "status": "failed",
+                            "message": "已达到最大重试次数",
+                            "progress": 100,
+                            "error": f"已达到最大重试次数: {max_retries}"
+                        }
+                    )
+
+            raise Exception(f"Task {task_id} - 已达到最大重试次数: {max_retries}")
 
         return wrapper
 
     return decorator
 
 
-def timeout(seconds: int):
+def timeout(seconds: int, db_update: bool = True):
     """任务超时控制装饰器"""
 
     def decorator(func):
@@ -142,14 +170,26 @@ def timeout(seconds: int):
         async def wrapper(*args, **kwargs):
             result = None
             start_time = time.time()
+            task_id = args[0]
             try:
                 result = await asyncio.wait_for(func(*args, **kwargs), timeout=seconds)
             except asyncio.TimeoutError:
-                print(f"Task {args[0]} - 超过 {seconds} 秒未完成，已中断")
-                await update_status(args[0], "failed", "处理超时", 100)
+                print(f"Task {task_id} - 超过 {seconds} 秒未完成，已中断")
+                if db_update:
+                    async with get_db_async() as db:
+                        await update_task_status_async(
+                            db,
+                            {
+                                "task_id": task_id,
+                                "status": "failed",
+                                "message": "处理超时",
+                                "progress": 100,
+                                "error": f"处理超时，超过 {seconds} 秒未完成",
+                            }
+                        )
                 raise
             finally:
-                print(f"Task {args[0]} - 任务总耗时: {time.time() - start_time:.2f}秒")
+                print(f"Task {task_id} - 任务总耗时: {time.time() - start_time:.2f}秒")
             return result
 
         return wrapper
@@ -558,15 +598,28 @@ class TaskQueueManager:
         async with self.lock:
             self.task_queue.put_nowait((task_id, original_path, original_ext, min_chunk_duration, separate))
             print(f"Task {task_id} - 已添加到任务队列")
+            # 记录任务初始状态
+            async with get_db_async() as db:
+                await  update_task_status_async(
+                    db,
+                    {
+                        "task_id": task_id,
+                        "status": "pending",
+                        "message": "任务已添加到队列，等待处理",
+                        "progress": 0,
+
+                    }
+                )
 
     async def process_task(self):
         """处理单个任务"""
         while True:
-            # 直接从队列获取任务，会自动阻塞直到队列中有任务
             task = await self.task_queue.get()
             task_id = task[0]
+
             async with self.lock:
                 self.running_tasks.add(task_id)
+
             try:
                 await process_audio_task(*task)
             except Exception as e:
@@ -641,41 +694,48 @@ class AudioService:
         :param max_segment_duration: 单次处理的最大时长（毫秒） 30 MINUS
         :return: 识别结果
         """
-        if separate:
-            self.ans_model(
-                file_path,
-                output_path=file_path
-            )
-        audio_info = self.get_audio_info(file_path)
-        audio_duration = audio_info['duration']
-        if audio_duration > max_segment_duration:
-            num_segments = int(audio_duration // max_segment_duration) + 1
-            results = []
-            for i in range(num_segments):
-                start_time = i * max_segment_duration
-                end_time = min((i + 1) * max_segment_duration, audio_duration)
-                segment = self.cut_audio_to_memory(file_path, start_time, end_time)
-                segment_result = self.transcribe_segment(
-                    segment,
-                    max_segment_duration * i,
-                    file_path
+        try:
+            if separate:
+                self.ans_model(
+                    file_path,
+                    output_path=file_path
                 )
-                results.append(segment_result)
+            audio_info = self.get_audio_info(file_path)
+            audio_duration = audio_info['duration']
+            if audio_duration > max_segment_duration:
+                num_segments = int(audio_duration // max_segment_duration) + 1
+                results = []
+                for i in range(num_segments):
+                    start_time = i * max_segment_duration
+                    end_time = min((i + 1) * max_segment_duration, audio_duration)
+                    segment = self.cut_audio_to_memory(file_path, start_time, end_time)
+                    segment_result = self.transcribe_segment(
+                        segment,
+                        max_segment_duration * i,
+                        file_path
+                    )
+                    results.append(segment_result)
 
-            final_result = self.merge_results(results)
-            return final_result
-        else:
-            # 不做分离，直接识别原始音频
-            result = self.transcribe_para_former_model(
-                input=file_path,
-                batch_size_token=4000,
-                batch_size_token_threshold_s=30,
-                vad=True,
-                punc=True,
-                spk=True
-            )
-            print(result)
-            return result
+                final_result = self.merge_results(results)
+                return final_result
+            else:
+                # 不做分离，直接识别原始音频
+                result = self.transcribe_para_former_model(
+                    input=file_path,
+                    batch_size_token=4000,
+                    batch_size_token_threshold_s=30,
+                    vad=True,
+                    punc=True,
+                    spk=True
+                )
+                print(result)
+                return result
+        finally:
+            if os.path.exists(file_path+"_temp_segment.wav"):
+                os.remove(file_path + "_temp_segment.wav")
+                print(f"已清理临时音频片段文件: {file_path + '_temp_segment.wav'}")
+
+
 
     def get_audio_info(self, file_path):
         """
