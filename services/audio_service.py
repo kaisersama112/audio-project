@@ -716,6 +716,10 @@ class AudioService:
                     # 确保最后一段至少有 min_segment_duration 的长度
                     if i == num_segments - 1 and (end_time - start_time) < min_segment_duration:
                         start_time = max(0, end_time - min_segment_duration)
+                        # 确保不超过音频总时长
+                        start_time = min(start_time, audio_duration - min_segment_duration)
+                        end_time = audio_duration  # 确保最后一段结束时间不超过音频总时长
+
                     segment = self.cut_audio_to_memory(file_path, start_time, end_time)
                     segment_result = self.transcribe_segment(
                         segment,
