@@ -64,6 +64,35 @@ def convert_to_wav(input_path: str, output_path: str):
         raise RuntimeError(f"格式转换失败: {str(e)}")
 
 
+def convert_to_wav_ffmpeg(input_path: str, output_path: str):
+    """
+    将音频文件转换为WAV格式
+
+    :param input_path: 输入文件路径
+    :param output_path: 输出文件路径
+    :return: None
+    """
+    try:
+
+        command = [
+            "ffmpeg",
+            "-i", input_path,
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            output_path
+        ]
+
+        # 执行命令
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    except subprocess.CalledProcessError as e:
+        # 捕获命令执行错误
+        raise RuntimeError(f"格式转换失败: {e.stderr.decode().strip()}") from e
+    except Exception as e:
+        raise RuntimeError(f"格式转换失败: {str(e)}") from e
+
+
 async def update_status(task_id, status: str, message: str, progress: int, complete_time=None):
     """
     更新任务状态
@@ -232,7 +261,7 @@ async def process_audio_task(
     if original_ext.lower() != '.wav':
         await update_status(task_id, "processing", "正在转换音频格式", 10)
         wav_path = os.path.join(task_dir, "audio.wav")
-        await asyncio.to_thread(convert_to_wav, original_path, wav_path)
+        await asyncio.to_thread(convert_to_wav_ffmpeg, original_path, wav_path)
         print(f"Task {task_id} - 音频格式转换耗时: {time.time() - stage_start_time:.2f}秒")
         # 清理原始音频文件
         os.remove(original_path)
@@ -724,7 +753,8 @@ class AudioService:
 
         print("Models loaded successfully")
 
-    def transcribe_para_former(self,task_id:str, file_path: str, separate: bool, max_segment_duration: int = 600000 * 3):
+    def transcribe_para_former(self, task_id: str, file_path: str, separate: bool,
+                               max_segment_duration: int = 600000 * 3):
         """
         根据 separate 参数决定是否先进行人声分离再进行语音识别。
         :param task_id: 任务ID
