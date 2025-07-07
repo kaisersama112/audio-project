@@ -198,7 +198,7 @@ def timeout(seconds: int, db_update: bool = True):
 
 
 @retry(max_retries=3, retry_delay=5)
-@timeout(seconds=60 * 30)  # 设置每个音频任务的最大处理时间为30分钟
+@timeout(seconds=60 * 60 * 6)  # 设置每个音频任务的最大处理时间为6小时：60分钟*6
 async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float, separate):
     task_dir = os.path.join(TEMP_DIR, task_id)
     start_time = time.time()  # 开始计时
