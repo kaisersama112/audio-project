@@ -57,7 +57,7 @@ class AIDownloadTask(Base):
 
 
 
-def init_db_async():
+def init_engine():
     """异步数据库引擎"""
     DB_CONFIG = {
         "host": MysqlConfig.host,
@@ -72,13 +72,16 @@ def init_db_async():
 
     engine = create_async_engine(
         db_url,
-        pool_size=10, # 连接池大小
-        max_overflow=5, # 连接池溢出
-        pool_recycle=30, # 连接池回收时间 （秒）
+        pool_size=20, # 连接池大小
+        max_overflow=10, # 连接池溢出
+        pool_recycle=3600, # 连接池回收时间 （秒）
         pool_pre_ping=True,
         echo=False,
     )
+    return engine
 
+
+
+def init_db_async(engine):
     SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
     return SessionLocal

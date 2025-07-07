@@ -4,7 +4,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from curd.async_models import AITask, AITaskResult, init_db_async
+from curd.async_models import AITask, AITaskResult, init_db_async, init_engine
 
 from sqlalchemy import func, delete
 
@@ -13,12 +13,14 @@ from sqlalchemy.future import select
 
 @asynccontextmanager
 async def get_db_async():
-    SessionLocal = init_db_async()
+    engine = init_engine()
+    SessionLocal = init_db_async(engine)
     async with SessionLocal() as session:
         try:
             yield session
         finally:
             await session.close()
+            await engine.dispose()
 
 
 async def get_task_async(db: AsyncSession, task_id: str):
@@ -220,4 +222,3 @@ async def delete_segments_by_indices_async(db: AsyncSession, task_id: str, indic
     await db.commit()
 
     return deleted_indices
-

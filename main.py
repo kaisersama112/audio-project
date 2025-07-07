@@ -3,7 +3,7 @@ import os
 from fastapi import FastAPI
 from starlette.staticfiles import StaticFiles
 from config import settings, DOWNLOAD_DIR
-from curd.async_models import init_db_async
+from curd.async_models import init_db_async, init_engine
 
 from routers import transcribe
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +27,8 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    init_db_async()
+    engine = init_engine()
+    SessionLocal = init_db_async(engine)
     print("数据库初始化完成")
     audio_service.load_model()
     print("模型加载完成")
