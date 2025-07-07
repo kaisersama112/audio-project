@@ -139,7 +139,7 @@ def retry(max_retries: int, retry_delay: float, exception_types: Tuple[type] = (
                                 }
                             )
 
-                    await asyncio.sleep(retry_delay)
+                await asyncio.sleep(retry_delay)
             task_id = args[0]
             print(f"Task {task_id} - 已达到最大重试次数: {max_retries}")
             if db_update:
@@ -224,12 +224,11 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         async with TRANSCRIBE_LOCK:
             result = await asyncio.to_thread(
                 audio_service.transcribe_para_former,
-                processing_path,
-                separate
-            )
+                processing_path, separate)
             # 添加结果检查
             if not isinstance(result, list) or len(result) == 0 or not isinstance(result[0], dict):
-                raise ValueError(f"Invalid transcription result: {result}")
+                await update_status(task_id, "processing", "当前音频并未识别到有效数据,请检查你的原始音频文件！", 100)
+                return
         print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
 
         # 发音人合并
@@ -702,16 +701,25 @@ class AudioService:
                 )
             audio_info = self.get_audio_info(file_path)
             audio_duration = audio_info['duration']
+            min_segment_duration = 10 * 60 * 1000  # 每段至少10分钟
+
             if audio_duration > max_segment_duration:
-                num_segments = int(audio_duration // max_segment_duration) + 1
+                num_segments = max(1, int(audio_duration // max_segment_duration))
+                # 确保最后一段的长度不会过短
+                if audio_duration % max_segment_duration < min_segment_duration and audio_duration % max_segment_duration != 0:
+                    num_segments += 1
+
                 results = []
                 for i in range(num_segments):
                     start_time = i * max_segment_duration
                     end_time = min((i + 1) * max_segment_duration, audio_duration)
+                    # 确保最后一段至少有 min_segment_duration 的长度
+                    if i == num_segments - 1 and (end_time - start_time) < min_segment_duration:
+                        start_time = max(0, end_time - min_segment_duration)
                     segment = self.cut_audio_to_memory(file_path, start_time, end_time)
                     segment_result = self.transcribe_segment(
                         segment,
-                        max_segment_duration * i,
+                        start_time,  # 正确传递起始时间
                         file_path
                     )
                     results.append(segment_result)
@@ -728,14 +736,11 @@ class AudioService:
                     punc=True,
                     spk=True
                 )
-                print(result)
                 return result
         finally:
-            if os.path.exists(file_path+"_temp_segment.wav"):
+            if os.path.exists(file_path + "_temp_segment.wav"):
                 os.remove(file_path + "_temp_segment.wav")
                 print(f"已清理临时音频片段文件: {file_path + '_temp_segment.wav'}")
-
-
 
     def get_audio_info(self, file_path):
         """
@@ -810,36 +815,39 @@ class AudioService:
         合并多个片段的结果，调整时间戳
 
         :param results: 所有片段的识别结果及其起始时间
-        :param total_duration: 原始音频的总时长（毫秒）
         :return: 合并后的识别结果
         """
         merged_result = {
             'sentence_info': []
         }
 
-        # 遍历每个片段的结果
-        for result, segment_start_time in results:
-            # 遍历片段中的每个句子
-            for sentence in result[0]['sentence_info']:
-                # 调整时间戳
-                new_sentence = {
-                    'end': segment_start_time + sentence['end'],
-                    'spk': sentence['spk'],
-                    'start': segment_start_time + sentence['start'],
-                    'text': sentence['text'],
-                    'timestamp': []
-                }
+        for result_item in results:
+            result, segment_start_time = result_item
+            if isinstance(result, list) and len(result) > 0 and 'sentence_info' in result[0]:
+                # 遍历片段中的每个句子
+                for sentence in result[0]['sentence_info']:
+                    # 调整时间戳
+                    new_sentence = {
+                        'end': segment_start_time + sentence['end'],
+                        'spk': sentence['spk'],
+                        'start': segment_start_time + sentence['start'],
+                        'text': sentence['text'],
+                        'timestamp': []
+                    }
 
-                # 调整时间戳数组
-                for timestamp in sentence['timestamp']:
-                    new_sentence['timestamp'].append(
-                        [segment_start_time + timestamp[0],
-                         segment_start_time + timestamp[1]]
-                    )
+                    # 调整时间戳数组
+                    for timestamp in sentence['timestamp']:
+                        new_sentence['timestamp'].append(
+                            [segment_start_time + timestamp[0],
+                             segment_start_time + timestamp[1]]
+                        )
 
-                merged_result['sentence_info'].append(new_sentence)
+                    merged_result['sentence_info'].append(new_sentence)
+            else:
 
-        return [merged_result]
+                print(f"结果结构不匹配，跳过处理：{result}")
+
+        return [merged_result] if merged_result['sentence_info'] else []
 
     def _upload_single_segment(self, segment_path: str, task_id: str, seg: dict, idx: int) -> Dict:
         """单个片段的上传任务"""

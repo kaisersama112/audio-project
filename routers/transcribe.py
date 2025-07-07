@@ -23,8 +23,6 @@ from config import TEMP_DIR
 from curd.async_crud import get_db_async, get_task_async, create_task_async, get_task_results_async, \
     get_segments_by_indices_async, get_all_segments_async, delete_segments_by_indices_async, \
     delete_segments_by_keywords_async
-# from curd.crud import get_db, create_task, get_task, get_task_results, get_segments_by_indices, get_all_segments, \
-#     delete_segments_by_keywords, delete_segments_by_indices
 from curd.models import AITaskResult, AIDownloadTask
 from models.schemas import TaskStatusResponse, PaginatedSegments, Segment
 from services.audio_service import format_task_merged_filename, load_segments_if_completed, process_audio_task, \
