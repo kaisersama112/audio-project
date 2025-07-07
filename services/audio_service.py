@@ -216,116 +216,116 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         processing_path = original_path
         await update_status(task_id, "processing", "音频格式无需转换", 10)
     print(f"Task {task_id} - 音频格式处理耗时: {time.time() - stage_start_time:.2f}秒")
-    # try:
-    await update_status(task_id, "processing", "开始语音识别", 20)
-    stage_start_time = time.time()
+    try:
+        await update_status(task_id, "processing", "开始语音识别", 20)
+        stage_start_time = time.time()
 
-    # 使用锁确保 transcribe_para_former 是串行调用
-    async with TRANSCRIBE_LOCK:
-        result = await asyncio.to_thread(
-            audio_service.transcribe_para_former,
-            processing_path,
-            separate
+        # 使用锁确保 transcribe_para_former 是串行调用
+        async with TRANSCRIBE_LOCK:
+            result = await asyncio.to_thread(
+                audio_service.transcribe_para_former,
+                processing_path,
+                separate
+            )
+            # 添加结果检查
+            if not isinstance(result, list) or len(result) == 0 or not isinstance(result[0], dict):
+                raise ValueError(f"Invalid transcription result: {result}")
+        print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
+
+        # 发音人合并
+        await update_status(task_id, "processing", "合并发音人信息", 30)
+        stage_start_time = time.time()
+
+        raw_segments = result[0]["sentence_info"]
+        merged_segments = await asyncio.to_thread(
+            audio_service.merge_segments,
+            task_id,
+            raw_segments,
+            min_chunk_duration,
+            merge_progress_callback
         )
-        # 添加结果检查
-        if not isinstance(result, list) or len(result) == 0 or not isinstance(result[0], dict):
-            raise ValueError(f"Invalid transcription result: {result}")
-    print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
+        print(f"Task {task_id} - 合并发音人信息耗时: {time.time() - stage_start_time:.2f}秒")
 
-    # 发音人合并
-    await update_status(task_id, "processing", "合并发音人信息", 30)
-    stage_start_time = time.time()
+        await update_status(task_id, "processing", "格式化识别结果", 60)
+        stage_start_time = time.time()
 
-    raw_segments = result[0]["sentence_info"]
-    merged_segments = await asyncio.to_thread(
-        audio_service.merge_segments,
-        task_id,
-        raw_segments,
-        min_chunk_duration,
-        merge_progress_callback
-    )
-    print(f"Task {task_id} - 合并发音人信息耗时: {time.time() - stage_start_time:.2f}秒")
+        # 保存所有分片到本地
+        segments_paths = await asyncio.to_thread(
+            audio_service.split_segments,
+            merged_segments,
+            processing_path,
+            task_id,
+            split_progress_callback
+        )
+        print(f"Task {task_id} - 分割音频片段耗时: {time.time() - stage_start_time:.2f}秒")
 
-    await update_status(task_id, "processing", "格式化识别结果", 60)
-    stage_start_time = time.time()
+        # 结果保存阶段
+        await update_status(task_id, "processing", "保存识别结果", 95)
+        stage_start_time = time.time()
 
-    # 保存所有分片到本地
-    segments_paths = await asyncio.to_thread(
-        audio_service.split_segments,
-        merged_segments,
-        processing_path,
-        task_id,
-        split_progress_callback
-    )
-    print(f"Task {task_id} - 分割音频片段耗时: {time.time() - stage_start_time:.2f}秒")
-
-    # 结果保存阶段
-    await update_status(task_id, "processing", "保存识别结果", 95)
-    stage_start_time = time.time()
-
-    async with get_db_async() as db:
-        try:
-            # 构建要插入的对象列表
-            objects_to_insert = []
-            for idx, segment_path, merged_seg in segments_paths:
-                url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
-                objects_to_insert.append(
-                    AITaskResult(
-                        task_id=task_id,
-                        index=idx,
-                        start=merged_seg.get("start"),
-                        end=merged_seg.get("end"),
-                        text=merged_seg.get("text"),
-                        speaker=str(merged_seg.get("spk")),
-                        url=base_url + url
+        async with get_db_async() as db:
+            try:
+                # 构建要插入的对象列表
+                objects_to_insert = []
+                for idx, segment_path, merged_seg in segments_paths:
+                    url = segment_path.replace("\\", "/").replace("/root/autodl-fs", "")
+                    objects_to_insert.append(
+                        AITaskResult(
+                            task_id=task_id,
+                            index=idx,
+                            start=merged_seg.get("start"),
+                            end=merged_seg.get("end"),
+                            text=merged_seg.get("text"),
+                            speaker=str(merged_seg.get("spk")),
+                            url=base_url + url
+                        )
                     )
-                )
 
-            # 批量添加
-            db.add_all(objects_to_insert)
-            await db.commit()
+                # 批量添加
+                db.add_all(objects_to_insert)
+                await db.commit()
 
-        except SQLAlchemyError as e:
-            await db.rollback()
-            raise HTTPException(500, detail=f"数据库插入失败: {str(e)}")
-    print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
+            except SQLAlchemyError as e:
+                await db.rollback()
+                raise HTTPException(500, detail=f"数据库插入失败: {str(e)}")
+        print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
 
-    await update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
-    print(f"Task {task_id} - 总耗时: {time.time() - start_time:.2f}秒")
-    # except Exception as e:
-    #     async with get_db_async() as conn:
-    #         await update_task_status_async(conn, {
-    #             "task_id": task_id,
-    #             "status": "failed",
-    #             "message": "处理过程中发生错误",
-    #             "progress": 100,
-    #             "error": str(e),
-    #             "complete_time": datetime.now().isoformat()
-    #         })
-    #         print(f"Task {task_id} - 处理失败，耗时: {time.time() - start_time:.2f}秒")
-    # finally:
-    #     # 清理原始数据，只保留切片数据
-    #     try:
-    #         # 清理原始音频文件（如果存在）
-    #         if os.path.exists(original_path):
-    #             os.remove(original_path)
-    #             print(f"Task {task_id} - 已清理原始音频文件: {original_path}")
-    #         # 清理处理后的音频文件（如果存在）
-    #         if os.path.exists(processing_path) and processing_path != original_path:
-    #             os.remove(processing_path)
-    #             print(f"Task {task_id} - 已清理处理后的音频文件: {processing_path}")
-    #         # 清理任务目录中的中间文件
-    #         for chunk in glob.glob(os.path.join(task_dir, "chunk_*.wav")):
-    #             os.remove(chunk)
-    #             print(f"Task {task_id} - 已清理中间文件: {chunk}")
-    #
-    #         # 如果任务目录为空，则删除目录
-    #         if os.path.exists(task_dir) and not os.listdir(task_dir):
-    #             os.rmdir(task_dir)
-    #             print(f"Task {task_id} - 已删除空任务目录: {task_dir}")
-    #
-    #     except Exception as e:
-    #         print(f"Task {task_id} - 清理文件时发生错误: {str(e)}")
+        await update_status(task_id, "completed", "处理完成", 100, complete_time=datetime.now().isoformat())
+        print(f"Task {task_id} - 总耗时: {time.time() - start_time:.2f}秒")
+    except Exception as e:
+        async with get_db_async() as conn:
+            await update_task_status_async(conn, {
+                "task_id": task_id,
+                "status": "failed",
+                "message": "处理过程中发生错误",
+                "progress": 100,
+                "error": str(e),
+                "complete_time": datetime.now().isoformat()
+            })
+            print(f"Task {task_id} - 处理失败，耗时: {time.time() - start_time:.2f}秒")
+    finally:
+        # 清理原始数据，只保留切片数据
+        try:
+            # 清理原始音频文件（如果存在）
+            if os.path.exists(original_path):
+                os.remove(original_path)
+                print(f"Task {task_id} - 已清理原始音频文件: {original_path}")
+            # 清理处理后的音频文件（如果存在）
+            if os.path.exists(processing_path) and processing_path != original_path:
+                os.remove(processing_path)
+                print(f"Task {task_id} - 已清理处理后的音频文件: {processing_path}")
+            # 清理任务目录中的中间文件
+            for chunk in glob.glob(os.path.join(task_dir, "chunk_*.wav")):
+                os.remove(chunk)
+                print(f"Task {task_id} - 已清理中间文件: {chunk}")
+
+            # 如果任务目录为空，则删除目录
+            if os.path.exists(task_dir) and not os.listdir(task_dir):
+                os.rmdir(task_dir)
+                print(f"Task {task_id} - 已删除空任务目录: {task_dir}")
+
+        except Exception as e:
+            print(f"Task {task_id} - 清理文件时发生错误: {str(e)}")
 
 
 async def get_task_result_dict_and_files(task_id: str, segments_dir: str):

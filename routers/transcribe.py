@@ -117,7 +117,6 @@ async def get_task_status(task_id: str):
         if task.status == "completed":  # 使用属性访问
             segments = await load_segments_if_completed(conn, task_id)
 
-        print(segments)
         return TaskStatusResponse(
             task_id=task.task_id,  # 使用属性访问
             status=task.status,  # 使用属性访问

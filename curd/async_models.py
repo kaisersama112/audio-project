@@ -72,9 +72,9 @@ def init_db_async():
 
     engine = create_async_engine(
         db_url,
-        pool_size=20,
-        max_overflow=10,
-        pool_recycle=3600,
+        pool_size=10, # 连接池大小
+        max_overflow=5, # 连接池溢出
+        pool_recycle=30, # 连接池回收时间 （秒）
         pool_pre_ping=True,
         echo=False,
     )
