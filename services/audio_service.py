@@ -754,9 +754,10 @@ class AudioService:
         print("Models loaded successfully")
 
     def transcribe_para_former(self, task_id: str, file_path: str, separate: bool,
-                               max_segment_duration: int = 600000 * 3):
+                               max_segment_duration: int = 600000 * 6):
         """
         根据 separate 参数决定是否先进行人声分离再进行语音识别。
+
         :param task_id: 任务ID
         :param file_path: 原始音频文件路径
         :param separate: 是否启用人声与背景音分离
@@ -774,9 +775,10 @@ class AudioService:
             min_segment_duration = 10 * 60 * 1000  # 每段至少10分钟
 
             if audio_duration > max_segment_duration:
-                num_segments = max(1, int(audio_duration // max_segment_duration))
-                # 确保最后一段的长度不会过短
-                if audio_duration % max_segment_duration < min_segment_duration and audio_duration % max_segment_duration != 0:
+                # 计算段落数，确保最后一段的长度不会过短
+                num_segments = int(audio_duration / max_segment_duration)
+                remainder = audio_duration % max_segment_duration
+                if remainder > 0:
                     num_segments += 1
 
                 results = []
