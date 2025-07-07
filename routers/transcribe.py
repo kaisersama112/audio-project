@@ -20,14 +20,13 @@ from sqlalchemy import select
 from starlette.responses import FileResponse
 
 from config import TEMP_DIR
-from curd.async_crud import get_db_async, get_task_async, create_task_async, get_task_results_async, \
+from curd.async_crud import get_db_async, get_task_async, get_task_results_async, \
     get_segments_by_indices_async, get_all_segments_async, delete_segments_by_indices_async, \
     delete_segments_by_keywords_async
 from curd.models import AITaskResult, AIDownloadTask
 from models.schemas import TaskStatusResponse, PaginatedSegments, Segment
-from services.audio_service import format_task_merged_filename, load_segments_if_completed, process_audio_task, \
+from services.audio_service import format_task_merged_filename, load_segments_if_completed, \
     process_download_task, task_queue_manager
-from utils.ucloud_u3d import UCloudFileDownloader
 
 router = APIRouter(tags=["音频切块"])
 
@@ -39,69 +38,19 @@ async def start_audio_processing(
         file_url: str = Form(...),
         min_chunk_duration: float = Form(3.0),  # 最小分片时长，单位秒
         separate: bool = Form(False),  # 人声背景分离
-        background_tasks: BackgroundTasks = None
 ):
     print("task_id:", task_id)
-    downloader = UCloudFileDownloader()
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    async with get_db_async() as db:
-        existing_task = await get_task_async(db, task_id)  # 使用之前定义的 get_task 函数
-        if existing_task:
-            shutil.rmtree(task_dir, ignore_errors=True)
-            raise HTTPException(status_code=409, detail="任务已存在")
-        # 创建任务目录
-        try:
-            os.makedirs(task_dir, exist_ok=True)
-        except Exception as e:
-            raise HTTPException(500, f"创建任务目录失败: {str(e)}")
-        # 下载音频文件
-        # 下载音频文件（使用UCloud下载器）
-        try:
-            # 确定下载文件的保存路径
-            # 假设音频是 wav 或 mp3 格式 - 根据实际需求调整
-            audio_filename = os.path.basename(file_url)
-            audio_filename_lower = audio_filename.lower()
-            if not audio_filename_lower.endswith(('.wav', '.mp3')):
-                raise HTTPException(400, "不支持的音频格式，仅支持 .wav 或 .mp3")
-            download_path = os.path.join(task_dir, audio_filename)
-            print(f"下载路径: {download_path}")
-            # 使用UCloud下载器下载文件
-            download_success = downloader.download_file(file_url, download_path)
-
-            if not download_success:
-                shutil.rmtree(task_dir, ignore_errors=True)
-                raise HTTPException(500, "从UCloud下载音频文件失败")
-
-            print(f"音频文件已下载到: {download_path}")
-        except Exception as e:
-            shutil.rmtree(task_dir, ignore_errors=True)
-            raise HTTPException(500, f"下载音频文件失败: {str(e)}")
-        try:
-            # 创建任务记录
-            await create_task_async(db, {
-                "task_id": task_id,
-                "status": "pending",
-                "message": "音频文件已下载，等待处理",
-                "progress": 20,
-                "original_path": download_path,
-                "created_at": datetime.now().isoformat(),
-                "start_time": None
-            })
-            db.commit()
-            # 添加后台任务进行音频处理
-            # background_tasks.add_task(process_audio_task, task_id, download_path, audio_filename, min_chunk_duration,
-            #                           separate)
-            await task_queue_manager.add_task(task_id, download_path, audio_filename, min_chunk_duration, separate)
-
-            return {
-                "task_id": task_id,
-                "status": "pending",
-                "message": "任务已开始处理"
-            }
-
-        except Exception as e:
-            shutil.rmtree(task_dir, ignore_errors=True)
-            raise HTTPException(500, f"任务启动失败: {str(e)}")
+    await task_queue_manager.add_task(
+        task_id,
+        file_url,
+        min_chunk_duration,
+        separate
+    )
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "message": "任务已开始处理"
+    }
 
 
 @router.get("/tasks/{task_id}/status", response_model=TaskStatusResponse, summary="获取任务状态")

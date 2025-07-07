@@ -6,7 +6,9 @@
 @Date    ：29/4/2025 下午4:51
 """
 import concurrent
+import shutil
 from functools import wraps
+from urllib.parse import urlparse
 
 import aiofiles
 import zipfile
@@ -33,12 +35,14 @@ import subprocess
 from modelscope.pipelines import pipeline
 from modelscope.utils.constant import Tasks
 
-from curd.async_crud import get_db_async, update_task_status_async, get_task_async
+from curd.async_crud import get_db_async, update_task_status_async, get_task_async, create_task_async
 from curd.models import AITaskResult, AIDownloadTask
 from models.schemas import Segment
 from services.oss_service import oss_service
 
 import asyncio
+
+from utils.ucloud_u3d import UCloudFileDownloader
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 # 定义最大并发数和全局锁
@@ -199,9 +203,30 @@ def timeout(seconds: int, db_update: bool = True):
 
 @retry(max_retries=3, retry_delay=5)
 @timeout(seconds=60 * 60 * 6)  # 设置每个音频任务的最大处理时间为6小时：60分钟*6
-async def process_audio_task(task_id: str, original_path: str, original_ext: str, min_chunk_duration: float, separate):
+async def process_audio_task(
+        task_id: str,
+        file_url,
+        min_chunk_duration: float,
+        separate
+):
+    """
+    处理音频任务
+    :param task_id: 任务ID
+    :param file_url: 音频文件URL
+    :param min_chunk_duration: 最小分片时长
+    :param separate: 是否分片
+    """
     task_dir = os.path.join(TEMP_DIR, task_id)
     start_time = time.time()  # 开始计时
+
+    loop = asyncio.get_running_loop()
+
+    original_path, original_ext = await loop.run_in_executor(
+        None,
+        lambda: asyncio.run(audio_service.audio_download_progress_callback(task_id, file_url, task_dir))
+    )
+
+    print(f"Task {task_id} - 音频下载耗时: {time.time() - start_time:.2f}秒")
     await update_status(task_id, "processing", "开始处理音频文件", 0)
     stage_start_time = time.time()
     if original_ext.lower() != '.wav':
@@ -215,7 +240,6 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
     else:
         processing_path = original_path
         await update_status(task_id, "processing", "音频格式无需转换", 10)
-    print(f"Task {task_id} - 音频格式处理耗时: {time.time() - stage_start_time:.2f}秒")
     try:
         await update_status(task_id, "processing", "开始语音识别", 20)
         stage_start_time = time.time()
@@ -224,15 +248,17 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         async with TRANSCRIBE_LOCK:
             result = await asyncio.to_thread(
                 audio_service.transcribe_para_former,
-                processing_path, separate)
-            # 添加结果检查
+                task_id,
+                processing_path,
+                separate
+            )
             if not isinstance(result, list) or len(result) == 0 or not isinstance(result[0], dict):
                 await update_status(task_id, "processing", "当前音频并未识别到有效数据,请检查你的原始音频文件！", 100)
                 return
         print(f"Task {task_id} - 语音识别耗时: {time.time() - stage_start_time:.2f}秒")
 
         # 发音人合并
-        await update_status(task_id, "processing", "合并发音人信息", 30)
+        await update_status(task_id, "processing", "合并发音人信息", 85)
         stage_start_time = time.time()
 
         raw_segments = result[0]["sentence_info"]
@@ -245,7 +271,7 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
         )
         print(f"Task {task_id} - 合并发音人信息耗时: {time.time() - stage_start_time:.2f}秒")
 
-        await update_status(task_id, "processing", "格式化识别结果", 60)
+        await update_status(task_id, "processing", "格式化识别结果", 90)
         stage_start_time = time.time()
 
         # 保存所有分片到本地
@@ -286,6 +312,7 @@ async def process_audio_task(task_id: str, original_path: str, original_ext: str
 
             except SQLAlchemyError as e:
                 await db.rollback()
+
                 raise HTTPException(500, detail=f"数据库插入失败: {str(e)}")
         print(f"Task {task_id} - 保存识别结果耗时: {time.time() - stage_start_time:.2f}秒")
 
@@ -591,11 +618,24 @@ class TaskQueueManager:
         self.running_tasks = set()
         self.lock = asyncio.Lock()
 
-    async def add_task(self, task_id: str, original_path: str, original_ext: str, min_chunk_duration: float,
-                       separate: bool):
+    async def add_task(self,
+                       task_id: str,
+                       file_url: str,
+                       # original_path: str,
+                       # original_ext: str,
+                       min_chunk_duration: float,
+                       separate: bool
+                       ):
         """添加任务到队列"""
         async with self.lock:
-            self.task_queue.put_nowait((task_id, original_path, original_ext, min_chunk_duration, separate))
+            self.task_queue.put_nowait((
+                task_id,
+                file_url,
+                # original_path,
+                # original_ext,
+                min_chunk_duration,
+                separate)
+            )
             print(f"Task {task_id} - 已添加到任务队列")
             # 记录任务初始状态
             async with get_db_async() as db:
@@ -684,10 +724,10 @@ class AudioService:
 
         print("Models loaded successfully")
 
-    def transcribe_para_former(self, file_path: str, separate: bool, max_segment_duration: int = 600000 * 3):
+    def transcribe_para_former(self,task_id:str, file_path: str, separate: bool, max_segment_duration: int = 600000 * 3):
         """
         根据 separate 参数决定是否先进行人声分离再进行语音识别。
-
+        :param task_id: 任务ID
         :param file_path: 原始音频文件路径
         :param separate: 是否启用人声与背景音分离
         :param max_segment_duration: 单次处理的最大时长（毫秒） 30 MINUS
@@ -727,6 +767,9 @@ class AudioService:
                         file_path
                     )
                     results.append(segment_result)
+                    if task_id:
+                        progress = int((i + 1) / num_segments * 70) + 15  # 15% 到 85%
+                        update_status(task_id, "processing", f"处理中，已完成 {i + 1} / {num_segments} 段", progress)
 
                 final_result = self.merge_results(results)
                 return final_result
@@ -740,6 +783,8 @@ class AudioService:
                     punc=True,
                     spk=True
                 )
+                if task_id:
+                    update_status(task_id, "processing", "处理中，已完成", 80)
                 return result
         finally:
             if os.path.exists(file_path + "_temp_segment.wav"):
@@ -1128,6 +1173,78 @@ class AudioService:
         # 按开始时间排序
         formatted_results.sort(key=lambda x: x.get("start", 0))
         return formatted_results
+
+    async def audio_download_progress_callback(self, task_id: str, file_url: str, task_dir: str) -> tuple:
+        """
+        音频下载进度回调函数
+
+        :param task_id: 任务ID
+        :param file_url: 文件URL
+        :param task_dir: 任务目录
+        :return: 下载的音频文件路径和文件名
+        :raises HTTPException: 如果任务已存在、下载失败或目录创建失败
+        """
+        async with get_db_async() as db:
+            # 检查任务是否已存在
+            existing_task = await get_task_async(db, task_id)
+            if existing_task:
+                # 清理任务目录（如果存在）
+                shutil.rmtree(task_dir, ignore_errors=True)
+                raise HTTPException(status_code=409, detail="任务已存在")
+
+        # 创建任务目录（如果不存在）
+        try:
+            os.makedirs(task_dir, exist_ok=True)
+        except Exception as e:
+            await update_status(task_id, "error ", f"创建任务目录失败: {str(e)}", 100)
+            raise HTTPException(status_code=500, detail=f"创建任务目录失败: {str(e)}")
+
+        downloader = UCloudFileDownloader()
+        download_path = None
+        audio_filename = None
+
+        try:
+            # 解析文件名并验证格式
+            parsed_url = urlparse(file_url)
+            audio_filename = os.path.basename(parsed_url.path)
+            audio_filename_lower = audio_filename.lower()
+
+            if not audio_filename_lower.endswith(('.wav', '.mp3')):
+                await update_status(task_id, "error ",
+                                    f"不支持的音频格式，仅支持 .wav 或 .mp3", 100)
+                raise HTTPException(status_code=400, detail="不支持的音频格式，仅支持 .wav 或 .mp3")
+
+            download_path = os.path.join(task_dir, audio_filename)
+
+            # 下载音频文件
+            download_success = downloader.download_file(file_url, download_path)
+            if not download_success:
+                await update_status(task_id, "error ", "下载音频文件失败", 100)
+                raise HTTPException(status_code=500, detail="从UCloud下载音频文件失败")
+
+            # 创建任务记录
+            async with get_db_async() as db:
+                task_created = await create_task_async(db, {
+                    "task_id": task_id,
+                    "status": "pending",
+                    "message": "音频文件已下载，等待处理",
+                    "progress": 20,
+                    "original_path": download_path,
+                    "created_at": datetime.now().isoformat(),
+                    "start_time": None
+                })
+                if not task_created:
+                    await update_status(task_id, "error ", "创建任务记录失败", 100)
+                    raise HTTPException(status_code=500, detail="创建任务记录失败")
+
+            print(f"音频文件已下载到: {download_path}")
+            return download_path, audio_filename
+
+        except Exception as e:
+
+            shutil.rmtree(task_dir, ignore_errors=True)
+            await update_status(task_id, "error ", f"下载音频文件失败: {str(e)}", 100)
+            raise HTTPException(status_code=500, detail=f"下载音频文件失败: {str(e)}")
 
 
 audio_service = AudioService()
