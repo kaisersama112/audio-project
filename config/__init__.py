@@ -17,7 +17,9 @@ class BaseConfig:
     reload = False
     quantize = True
     use_fp16 = True
-    cache_dir = "./cache"
+    cache_dir = "./cache",
+    QUEUE_MAXSIZE = 20  # 队列最大大小
+    MAX_CONCURRENT_TASKS = 5  # 最大并发任务数
 
 
 OSS_CONFIG = {

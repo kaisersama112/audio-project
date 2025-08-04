@@ -22,7 +22,7 @@ from starlette.responses import FileResponse
 from config import TEMP_DIR
 from curd.async_crud import get_db_async, get_task_async, get_task_results_async, \
     get_segments_by_indices_async, get_all_segments_async, delete_segments_by_indices_async, \
-    delete_segments_by_keywords_async
+    delete_segments_by_keywords_async, delete_task_async
 from curd.models import AITaskResult, AIDownloadTask
 from models.schemas import TaskStatusResponse, PaginatedSegments, Segment
 from services.audio_service import format_task_merged_filename, load_segments_if_completed, \
@@ -377,3 +377,38 @@ async def get_speakers(
 
     except Exception as e:
         raise HTTPException(500, detail=f"获取发音人列表时出错: {str(e)}")
+
+
+@router.post("/retry_task", summary="指定任务重试")
+async def retry_task(
+        task_id: str = Form(...),
+        min_chunk_duration: float = Form(3.0),  # 最小分片时长，单位秒
+        separate: bool = Form(False),  # 人声背景分离
+):
+    """指定任务重试"""
+    try:
+
+        async with get_db_async() as conn:
+            result = await get_task_async(conn, task_id)
+            original_path = result.original_path
+            file_url = os.path.basename(original_path)
+            print("task_id:", task_id)
+            if result:
+                await delete_task_async(conn, task_id)
+                print(f"task_id:{task_id},file_url:{file_url}")
+                await task_queue_manager.add_task(
+                    task_id,
+                    file_url,
+                    min_chunk_duration,
+                    separate
+                )
+                print("任务重新生成成功")
+                return {
+                    "task_id": task_id,
+                    "status": "pending",
+                    "message": "任务已开始处理"
+                }
+            else:
+                raise HTTPException(404, detail="任务不存在")
+    except Exception as e:
+        raise HTTPException(500, detail=f"重试任务时出错: {str(e)}")

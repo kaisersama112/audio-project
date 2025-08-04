@@ -27,7 +27,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from config import base_url
+from config import base_url, settings
 from config import hotword_list, TEMP_DIR, DOWNLOAD_DIR
 import time
 import os
@@ -153,10 +153,12 @@ def retry(max_retries: int, retry_delay: float, exception_types: Tuple[type] = (
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
+            last_exception = None  # 新增：记录最后一次异常
             for attempt in range(max_retries):
                 try:
                     return await func(*args, **kwargs)
                 except exception_types as e:
+                    last_exception = e  # 新增：更新最后一次异常
                     task_id = args[0]
                     print(f"Task {task_id} - 第 {attempt + 1} 次尝试失败: {str(e)}")
                     if db_update:
@@ -184,11 +186,11 @@ def retry(max_retries: int, retry_delay: float, exception_types: Tuple[type] = (
                             "status": "failed",
                             "message": "已达到最大重试次数",
                             "progress": 100,
-                            "error": f"已达到最大重试次数: {max_retries}"
+                            "error": f"已达到最大重试次数 {max_retries}，失败原因: {str(last_exception)}"
                         }
                     )
 
-            raise Exception(f"Task {task_id} - 已达到最大重试次数: {max_retries}")
+            raise Exception(f"Task {task_id} - 已达到最大重试次数: {max_retries}, 失败原因: {str(last_exception)}")
 
         return wrapper
 
@@ -642,47 +644,55 @@ def extract_index_from_filename(filename):
 
 class TaskQueueManager:
     def __init__(self):
-        self.task_queue = asyncio.Queue()
-        self.max_concurrent_tasks = 5  # 最大并发任务数
+        self.task_queue = asyncio.Queue(maxsize=settings.QUEUE_MAXSIZE)  # 例如配置为100
+        self.max_concurrent_tasks = settings.MAX_CONCURRENT_TASKS  # 从配置文件读取，默认5
         self.running_tasks = set()
         self.lock = asyncio.Lock()
 
-    async def add_task(self,
-                       task_id: str,
-                       file_url: str,
-                       # original_path: str,
-                       # original_ext: str,
-                       min_chunk_duration: float,
-                       separate: bool
-                       ):
+    async def add_task(self, task_id: str, file_url: str, min_chunk_duration: float, separate: bool):
         """添加任务到队列"""
         async with self.lock:
-            self.task_queue.put_nowait((
-                task_id,
-                file_url,
-                # original_path,
-                # original_ext,
-                min_chunk_duration,
-                separate)
-            )
-            print(f"Task {task_id} - 已添加到任务队列")
-            # 记录任务初始状态
-            async with get_db_async() as db:
-                await  update_task_status_async(
-                    db,
-                    {
-                        "task_id": task_id,
-                        "status": "pending",
-                        "message": "任务已添加到队列，等待处理",
-                        "progress": 0,
-
-                    }
+            try:
+                await asyncio.wait_for(
+                    self.task_queue.put((task_id, file_url, min_chunk_duration, separate)),
+                    timeout=10.0  # 超时时间可配置
                 )
+                async with get_db_async() as db:
+                    await  update_task_status_async(
+                        db,
+                        {
+                            "task_id": task_id,
+                            "status": "pending",
+                            "message": "任务已添加到队列，等待处理",
+                            "progress": 0,
+
+                        }
+                    )
+                print(f"Task {task_id} - 已添加到任务队列（当前队列长度: {self.task_queue.qsize()}）")
+            except asyncio.TimeoutError:
+                # 3. 队列满时返回明确错误，避免任务静默丢失
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"任务队列已满，请稍后重试（当前队列长度: {self.task_queue.qsize()}/{self.task_queue.maxsize}）"
+                )
+                async with get_db_async() as db:
+                    await  update_task_status_async(
+                        db,
+                        {
+                            "task_id": task_id,
+                            "status": "failed",
+                            "message": "任务队列已满，请稍后重试",
+                            "progress": 100,
+
+                        }
+                    )
 
     async def process_task(self):
         """处理单个任务"""
         while True:
             task = await self.task_queue.get()
+            if task is None:
+                continue
             task_id = task[0]
 
             async with self.lock:
