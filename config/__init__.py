@@ -20,7 +20,8 @@ class BaseConfig:
     cache_dir = "./cache",
     QUEUE_MAXSIZE = 20  # 队列最大大小
     MAX_CONCURRENT_TASKS = 5  # 最大并发任务数
-
+    CLEANUP_TEMP_DAYS = 35  # 新增：清理TEMP_DIR下旧文件夹的天数阈值
+    CLEANUP_DOWNLOAD_HOURS = 1  # 新增：清理DOWNLOAD_DIR下旧压缩包的小时阈值
 
 OSS_CONFIG = {
     "access_key_id": "LTAI5tGE9kR3DQYcFWJfKkk8",
